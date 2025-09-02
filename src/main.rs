@@ -1,10 +1,14 @@
 use serde::{Deserialize, Serialize};
-use std::{fs::File, path::PathBuf};
+use std::{
+    fs::File,
+    path::PathBuf,
+    process::{Command, Stdio},
+};
 
 mod fsrs;
 
 #[derive(Debug, Serialize, Deserialize)]
-struct Card {
+pub struct Card {
     id: u64,
     fsrs_params: fsrs::FSRSParams,
 }
@@ -18,17 +22,39 @@ pub fn data_path() -> anyhow::Result<PathBuf> {
         .unwrap_or(home))
 }
 
-fn main() -> anyhow::Result<()> {
+/// Intialize state, returning a list of flashcards
+pub fn initialize_cards() -> anyhow::Result<Vec<Card>> {
     let data_path = data_path()?;
     std::fs::create_dir_all(&data_path)?;
 
     let mut card_data = data_path.clone();
     card_data.push("cards.json");
+    _ = card_data;
 
-    let card_file = File::open(card_data)?;
-    let cards = serde_json::from_reader::<_, Vec<Card>>(card_file);
-    println!("{:?}", cards);
+    let actual_cards = Command::new("rg")
+        .arg("-g")
+        .arg("*.{md,adoc,txt}")
+        .arg("-0b")
+        .arg("REVIEW:")
+        .stdin(Stdio::null())
+        .output()?;
+    let content = String::from_utf8_lossy(&actual_cards.stdout);
+    let data: Vec<_> = content
+        .split('\n')
+        .filter_map(|s| {
+            let (filename, rest) = s.split_once('\0')?;
+            let (byte_off_str, content) = rest.split_once(":")?;
+            let byte_off: u64 = byte_off_str.parse().ok()?;
+            Some((filename, byte_off, content))
+        })
+        .collect();
 
-    println!("Hello, world! {:?}", data_path);
+    Ok(vec![])
+}
+
+fn main() -> anyhow::Result<()> {
+    let cards = initialize_cards()?;
+
+    println!("Hello, world! {:?}", cards);
     Ok(())
 }
