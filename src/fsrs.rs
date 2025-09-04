@@ -18,7 +18,7 @@ pub enum Grade {
     Easy = 4,
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FSRSParams {
     stability: f32,
     difficulty: f32,
@@ -33,53 +33,88 @@ impl FSRSParams {
     }
     pub fn from_initial_grade(grade: Grade) -> Self {
         let w = WEIGHTS;
-        let g = grade;
-        Self {
-            stability: w[g as usize - 1],
-            difficulty: w[4] - f32::exp(w[5] * (g as u8 as f32 - 1.0)) + 1.0,
-        }
+        let g = grade as u8 as f32;
+        // We need to use `new` here because the value of difficulty should be clamped
+        // Otherwise, the difficulty for `Grade::Easy` will end up negative
+        Self::new(w[g as usize - 1], w[4] - f32::exp(w[5] * (g - 1.0)) + 1.0)
     }
 
     pub fn update_successful(self, grade: Grade) -> Self {
         let w = WEIGHTS;
-        let g = grade;
+        let g = grade as u8 as f32;
         let s = self.stability;
         let d = self.difficulty;
-        let r = self.recall_probability();
+        let r = self.recall_probability(0.0);
 
         let increase_d = 11.0 - d;
         let increase_s = s.powf(-w[9]);
         let increase_r = f32::exp(w[10] * (1.0 - r) - 1.0);
         let increase = 1.0 + increase_d * increase_s * increase_r;
 
-        let delta_d = -w[6] * (g as u8 as f32 - 3.0);
+        let delta_d = -w[6] * (g - 3.0);
+
+        // Linear damping
         let d1 = d + delta_d * (10.0 - d) / 9.0;
+        // Mean reversion
         let d2 = w[7] * Self::from_initial_grade(Grade::Easy).difficulty + (1.0 - w[7]) * d1;
-        Self {
-            stability: s * increase,
-            difficulty: d2,
-        }
+
+        Self::new(s * increase, d2)
     }
 
     pub fn update_same_day(self, grade: Grade) -> Self {
         let w = WEIGHTS;
-        let g = grade;
+        let g = grade as u8 as f32;
         let s = self.stability;
 
-        let mut s2 = s * (w[17] * (g as u8 as f32 - 3.0 + w[18])).exp() * s.powf(-w[19]);
-        if let Grade::Easy | Grade::Good = g
-            && s2 < s
-        {
-            s2 = s;
+        let sinc = f32::exp(w[17] * (g - 3.0 + w[18])) * s.powf(-w[19]);
+        let mut s2 = s * sinc;
+
+        if g >= 3.0 {
+            s2 = s2.max(s);
         }
-        Self {
-            stability: s2,
-            difficulty: 0.0,
-        }
+        Self::new(s2, 1.0)
     }
 
-    pub fn recall_probability(self) -> f32 {
+    /// Recall probability after `time` days
+    pub fn recall_probability(self, time: f32) -> f32 {
         let w = WEIGHTS;
-        1.0 + (0.9_f32.powf(-1.0 / w[20]) - 1.0).powf(-w[20])
+        let s = self.stability;
+
+        let factor = 0.9_f32.powf(-1.0 / w[20]) - 1.0;
+        (1.0 + factor * time / s).powf(-w[20])
+    }
+}
+
+// Most of these are simple sanity checks, or tests against hardcoded data
+// This should be fine since the algorithm shouldn't change often,
+// and even if it does, it should be reimplemented rather than modified
+// In the future, we should implement more stronger testing,
+// by checking against a reference implementation,
+// or against real Anki user data
+#[cfg(test)]
+mod tests {
+    use std::f32::consts::E;
+
+    use super::*;
+
+    #[test]
+    pub fn sanity_check() {
+        let w = WEIGHTS;
+        let grades = [Grade::Again, Grade::Hard, Grade::Good, Grade::Easy];
+        let stabilities = &w[0..4];
+        let difficulties = [
+            w[4],
+            w[4] - f32::exp(w[5]) + 1.0,
+            w[4] - f32::exp(w[5] * 2.0) + 1.0,
+            w[4] - f32::exp(w[5] * 3.0) + 1.0,
+        ];
+
+        for i in 0..4 {
+            println!("{}", i);
+            assert_eq!(
+                FSRSParams::from_initial_grade(grades[i]),
+                FSRSParams::new(stabilities[i], difficulties[i])
+            );
+        }
     }
 }
