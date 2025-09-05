@@ -16,7 +16,7 @@ pub fn from_base64(data: Base64) -> Option<u64> {
     for (idx, i) in data.iter().enumerate() {
         let position = ALPHABET.iter().position(|e| e == i)?;
         // TODO: Implement padding properly
-        if idx == data.len()-1 {
+        if idx == data.len() - 1 {
             res <<= 4;
             res |= (position >> 2) as u64;
         } else {

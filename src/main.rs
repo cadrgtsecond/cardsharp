@@ -1,16 +1,21 @@
+use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::{HashMap, hash_map::Entry},
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::PathBuf,
     process::{Command, Stdio},
+    time::SystemTime,
 };
+
+use crate::fsrs::{FSRSParams, Grade};
 
 mod base64;
 mod fsrs;
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct CardContent {
+struct Card {
     id: u64,
     #[serde(skip)]
     title: String,
@@ -18,13 +23,7 @@ pub struct CardContent {
     body: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Card {
-    content: CardContent,
-    fsrs_params: fsrs::FSRSParams,
-}
-
-pub fn data_path() -> anyhow::Result<PathBuf> {
+fn data_path() -> anyhow::Result<PathBuf> {
     let mut home = PathBuf::from(std::env::var("HOME")?);
     home.push(".local/share/cardsharp");
 
@@ -33,8 +32,8 @@ pub fn data_path() -> anyhow::Result<PathBuf> {
         .unwrap_or(home))
 }
 
-/// Parses the base64 ID string from a given title
-pub fn parse_id_from_title(mut title: &str) -> Option<u64> {
+/// Parses a title, returning the base64 id and the actual title
+fn parse_title(mut title: &str) -> Option<(u64, &str)> {
     if title.starts_with("REVIEW:") {
         title = &title[7..];
     }
@@ -43,17 +42,11 @@ pub fn parse_id_from_title(mut title: &str) -> Option<u64> {
         return None;
     }
     title = &title[2..];
-    base64::from_base64(
-        title
-            .split_whitespace()
-            .next()?
-            .as_bytes()
-            .try_into()
-            .ok()?,
-    )
+    let (id, title) = title.split_once(char::is_whitespace)?;
+    Some((base64::from_base64(id.as_bytes().try_into().ok()?)?, title))
 }
 
-pub fn find_card_content() -> anyhow::Result<Vec<CardContent>> {
+fn initialize_cards() -> anyhow::Result<Vec<Card>> {
     // TODO: Support other searching commands, such as `grep -R` or `ag`
     let grep_result = Command::new("rg")
         .arg("-g")
@@ -95,9 +88,10 @@ pub fn find_card_content() -> anyhow::Result<Vec<CardContent>> {
             body.push_str(&next_line);
         }
 
-        let id = match parse_id_from_title(&title) {
-            Some(x) => x,
+        let (id, title) = match parse_title(&title) {
+            Some((id, title)) => (id, String::from(title)),
             None => {
+                // TODO: Implement automated testing of adding ID's
                 println!("New card in found in {}", cardpath.to_string_lossy());
                 let id: u64 = rand::random();
                 let mut file = OpenOptions::new().read(true).write(true).open(&cardpath)?;
@@ -109,31 +103,142 @@ pub fn find_card_content() -> anyhow::Result<Vec<CardContent>> {
                 written += file.write(b" __")? as u64;
                 written += file.write(&base64::to_base64(id))? as u64;
                 file.write(rest.as_bytes())? as u64;
-                id
+                (
+                    id,
+                    String::from(&rest[0..rest.find('\n').unwrap_or(rest.len())]),
+                )
             }
         };
-        Ok(CardContent { id, title, body })
+        Ok(Card { id, title, body })
     })
     .collect()
 }
 
-/// Intialize state, returning a list of flashcards
-pub fn initialize_cards() -> anyhow::Result<Vec<Card>> {
-    let data_path = data_path()?;
-    std::fs::create_dir_all(&data_path)?;
+#[derive(Debug, Serialize, Deserialize)]
+struct CardParams {
+    last_review: SystemTime,
+    fsrs: fsrs::FSRSParams,
+}
 
-    let mut card_data = data_path.clone();
-    card_data.push("cards.json");
-    _ = card_data;
-    let content = find_card_content();
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct Data {
+    #[serde(default)]
+    fsrs_params: HashMap<String, CardParams>,
+}
 
-    Ok(vec![])
+#[derive(Debug)]
+struct State {
+    data: Data,
+    data_file: File,
+    cards: Vec<Card>,
+}
+
+impl State {
+    fn new() -> anyhow::Result<State> {
+        let mut data_path = data_path()?;
+        std::fs::create_dir_all(&data_path)?;
+
+        data_path.push("cards.json");
+
+        let data_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(data_path)?;
+        let cards = initialize_cards()?;
+        let data = serde_json::from_reader(&data_file).unwrap_or_else(|_| Data::default());
+
+        Ok(State {
+            data,
+            data_file,
+            cards,
+        })
+    }
+
+    fn save(&mut self) -> anyhow::Result<()> {
+        self.data_file.seek(SeekFrom::Start(0))?;
+        serde_json::to_writer(&mut self.data_file, &self.data)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Parser)]
+#[command(version)]
+enum Commands {
+    /// Initializes all cards under the current directory, state, and config
+    ///
+    /// This is equivalent to using `review` and immediately quitting.
+    /// Used mainly to add id's after `REVIEW:` without doing it manually
+    Init {},
+    Review {
+        /// Target retention for study
+        ///
+        /// Clamped between 0.0 and 1.0
+        #[arg(short, long, default_value = "0.9")]
+        retention: f32,
+    },
+}
+
+fn review_again(card_params: &CardParams, card: &Card, retention: f32) {}
+
+fn review_first_time(card: &Card) -> anyhow::Result<CardParams> {
+    let mut stdin = BufReader::new(std::io::stdin());
+    let mut stdout = std::io::stdout();
+
+    print!("{}\nPress enter to show backside...", card.title.trim());
+    stdout.flush()?;
+
+    let mut buf = String::new();
+    stdin.read_line(&mut buf)?;
+    _ = buf;
+
+    println!("{}", card.body.trim());
+    println!("1:again\t2: hard\t3/space: good\t4: easy\nEnter grade:");
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    let mut buf = String::new();
+    stdin.read_line(&mut buf)?;
+    let grade = match buf.trim() {
+        "1" => Grade::Again,
+        "2" => Grade::Hard,
+        "3" => Grade::Good,
+        "4" => Grade::Easy,
+        _ => Grade::Good,
+    };
+
+    Ok(CardParams {
+        last_review: SystemTime::now(),
+        fsrs: FSRSParams::from_initial_grade(grade),
+    })
 }
 
 fn main() -> anyhow::Result<()> {
-    let cards = initialize_cards()?;
-
-    println!("Hello, world! {:?}", cards);
+    let command = Commands::parse();
+    match command {
+        Commands::Init {} => {
+            let mut state = State::new()?;
+            state.save()?;
+        }
+        Commands::Review { retention } => {
+            let mut state = State::new()?;
+            for card in &state.cards {
+                let id = str::from_utf8(&base64::to_base64(card.id))
+                    .expect("This is always valid utf8")
+                    .to_string();
+                match state.data.fsrs_params.entry(id) {
+                    Entry::Occupied(entry) => {
+                        review_again(entry.get(), &card, retention.clamp(0.0, 1.0));
+                    }
+                    Entry::Vacant(entry) => {
+                        let params = review_first_time(&card)?;
+                        println!("{:?}", params);
+                        entry.insert(params);
+                    }
+                }
+            }
+            state.save()?;
+        }
+    }
     Ok(())
 }
 
