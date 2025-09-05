@@ -1,17 +1,20 @@
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::File,
-    io::{BufRead, BufReader, Seek, SeekFrom},
+    fs::{File, OpenOptions},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::PathBuf,
     process::{Command, Stdio},
 };
 
+mod base64;
 mod fsrs;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CardContent {
     id: u64,
+    #[serde(skip)]
     title: String,
+    #[serde(skip)]
     body: String,
 }
 
@@ -30,6 +33,26 @@ pub fn data_path() -> anyhow::Result<PathBuf> {
         .unwrap_or(home))
 }
 
+/// Parses the base64 ID string from a given title
+pub fn parse_id_from_title(mut title: &str) -> Option<u64> {
+    if title.starts_with("REVIEW:") {
+        title = &title[7..];
+    }
+    title = title.trim_start();
+    if !title.starts_with("__") {
+        return None;
+    }
+    title = &title[2..];
+    base64::from_base64(
+        title
+            .split_whitespace()
+            .next()?
+            .as_bytes()
+            .try_into()
+            .ok()?,
+    )
+}
+
 pub fn find_card_content() -> anyhow::Result<Vec<CardContent>> {
     // TODO: Support other searching commands, such as `grep -R` or `ag`
     let grep_result = Command::new("rg")
@@ -40,43 +63,58 @@ pub fn find_card_content() -> anyhow::Result<Vec<CardContent>> {
         .stdin(Stdio::null())
         .output()?;
     let grep_result = String::from_utf8_lossy(&grep_result.stdout);
-    let data = grep_result
-        .split('\n')
-        .filter_map(|s| {
-            let (filename, rest) = s.split_once('\0')?;
-            let (byte_off_str, _content) = rest.split_once(":")?;
+    let data = grep_result.split('\n').filter_map(|s| {
+        let (filename, rest) = s.split_once('\0')?;
+        let (byte_off_str, _content) = rest.split_once(":")?;
 
-            Some((PathBuf::from(filename), byte_off_str.parse().ok()?))
-        });
+        Some((PathBuf::from(filename), byte_off_str.parse::<u64>().ok()?))
+    });
 
-    let mut acc = None;
-    for (cardpath, off) in data {
-        // This trickery is to avoid opening the same file multiple times
-        let (mut file, filename) = match acc {
-            // filepath == filename
-            Some((file @ _, filepath)) => (file, filepath),
-            _ => (BufReader::new(File::open(&cardpath)?), cardpath.clone()),
-        };
-
-        file.seek(SeekFrom::Start(off))?;
-        let mut line = String::new();
-        file.read_line(&mut line)?;
-
-        let mut content = String::new();
-        loop {
-            let mut next_line = String::new();
-            file.read_line(&mut next_line);
-            if next_line.starts_with("REVIEW:") || next_line == "---\n" || next_line == "" {
-                break;
-            }
-            content.push_str(&next_line);
+    let mut written = 0;
+    let mut prev_path = None;
+    // ⊔ would make my life a whole lot easier
+    // TODO: Avoid opening the same file multiple times
+    data.map(|(cardpath, off)| -> anyhow::Result<_> {
+        let mut file = BufReader::new(File::open(&cardpath)?);
+        if Some(&cardpath) != prev_path.as_ref() {
+            written = 0;
+            prev_path = Some(cardpath.clone());
         }
 
-        println!("{line}<<<<\n{content}---");
+        file.seek(SeekFrom::Start(written + off))?;
+        let mut title = String::new();
+        file.read_line(&mut title)?;
 
-        acc = Some((file, filename));
-    };
-    Ok(vec![])
+        let mut body = String::new();
+        loop {
+            let mut next_line = String::new();
+            file.read_line(&mut next_line)?;
+            if next_line.starts_with("REVIEW:") || next_line == "---\n" || next_line.is_empty() {
+                break;
+            }
+            body.push_str(&next_line);
+        }
+
+        let id = match parse_id_from_title(&title) {
+            Some(x) => x,
+            None => {
+                println!("New card in found in {}", cardpath.to_string_lossy());
+                let id: u64 = rand::random();
+                let mut file = OpenOptions::new().read(true).write(true).open(&cardpath)?;
+                let mut rest = String::new();
+                file.seek(SeekFrom::Start(written + off + 7))?;
+                file.read_to_string(&mut rest)?;
+
+                file.seek(SeekFrom::Start(written + off + 7))?;
+                written += file.write(b" __")? as u64;
+                written += file.write(&base64::to_base64(id))? as u64;
+                file.write(rest.as_bytes())? as u64;
+                id
+            }
+        };
+        Ok(CardContent { id, title, body })
+    })
+    .collect()
 }
 
 /// Intialize state, returning a list of flashcards
@@ -97,4 +135,29 @@ fn main() -> anyhow::Result<()> {
 
     println!("Hello, world! {:?}", cards);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    pub fn parsing_title() {
+        // Valid formats
+        assert_eq!(
+            parse_id_from_title("REVIEW:__+KkJkFEm3+M"),
+            Some(17917863107911671779)
+        );
+        assert_eq!(
+            parse_id_from_title("REVIEW:  __ayBz0QJqjYk"),
+            Some(7719297102838926729)
+        );
+        assert_eq!(
+            parse_id_from_title("__/nr0HfQpvoM"),
+            Some(18337237242280001155)
+        );
+
+        // Invalid formats
+        assert_eq!(parse_id_from_title("db02tXj37Co"), None);
+        assert_eq!(parse_id_from_title("__9OgKjjs"), None);
+    }
 }

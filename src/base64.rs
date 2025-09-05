@@ -5,9 +5,9 @@ const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwx
 
 pub fn to_base64(mut data: u64) -> Base64 {
     let mut res = [0u8; 11];
-    for i in 0..11 {
-        res[i] = ALPHABET[(data >> 58) as usize];
-        data = data << 6;
+    for i in &mut res {
+        *i = ALPHABET[(data >> 58) as usize];
+        data <<= 6;
     }
     res
 }
@@ -15,14 +15,14 @@ pub fn from_base64(data: Base64) -> Option<u64> {
     let mut res = 0u64;
     for (idx, i) in data.iter().enumerate() {
         let position = ALPHABET.iter().position(|e| e == i)?;
+        // TODO: Implement padding properly
         if idx == data.len()-1 {
-            res = res << 4;
-            res = res | (position >> 2) as u64;
+            res <<= 4;
+            res |= (position >> 2) as u64;
         } else {
-            res = res << 6;
-            res = res | position as u64;
+            res <<= 6;
+            res |= position as u64;
         }
-        println!("{}, {}", char::from(*i), position);
     }
     Some(res)
 }
