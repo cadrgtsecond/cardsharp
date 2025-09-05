@@ -1,9 +1,12 @@
 use clap::Parser;
+use crossterm::{
+    cursor::MoveTo, event::{Event, KeyCode}, execute, terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen}
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, hash_map::Entry},
     fs::{File, OpenOptions},
-    io::{BufRead, BufReader, Read, Seek, SeekFrom, Stdin, Stdout, Write},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::PathBuf,
     process::{Command, Stdio},
     time::SystemTime,
@@ -94,7 +97,11 @@ fn initialize_cards() -> anyhow::Result<Vec<Card>> {
                 // TODO: Implement automated testing of adding ID's
                 println!("New card in found in {}", cardpath.to_string_lossy());
                 let id: u64 = rand::random();
-                let mut file = OpenOptions::new().read(true).write(true).create(true).open(&cardpath)?;
+                let mut file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .open(&cardpath)?;
                 let mut rest = String::new();
                 file.seek(SeekFrom::Start(written + off + 7))?;
                 file.read_to_string(&mut rest)?;
@@ -185,26 +192,50 @@ fn review_card(card: &Card) -> anyhow::Result<Grade> {
     let mut stdin = BufReader::new(std::io::stdin());
     let mut stdout = std::io::stdout();
 
-    print!("{}\nPress enter to show backside...", card.title.trim());
+    execute!(stdout, MoveTo(0, 0))?;
+    execute!(stdout, Clear(ClearType::All))?;
+    print!("{}\r\nPress any key to show backside...", card.title.trim());
     stdout.flush()?;
 
-    let mut buf = String::new();
-    stdin.read_line(&mut buf)?;
-    _ = buf;
+    loop {
+        let ev = crossterm::event::read()?;
+        println!("{:?}", ev);
+        match ev {
+            Event::Key(_) => break,
+            _ => {}
+        }
+    }
 
-    println!("{}", card.body.trim());
-    println!("1:again\t2: hard\t3/space: good\t4: easy\nEnter grade:");
-    std::thread::sleep(std::time::Duration::from_secs(2));
+    execute!(stdout, MoveTo(0, 0))?;
+    execute!(stdout, Clear(ClearType::All))?;
+    println!("{}\r", card.body.trim());
+    println!("1:again\t2: hard\t3/space: good\t4: easy");
 
-    let mut buf = String::new();
-    stdin.read_line(&mut buf)?;
-    Ok(match buf.trim() {
-        "1" => Grade::Again,
-        "2" => Grade::Hard,
-        "3" => Grade::Good,
-        "4" => Grade::Easy,
-        _ => Grade::Good,
-    })
+    let grade;
+    loop {
+        let ev = crossterm::event::read()?;
+        println!("{:?}", ev);
+        match ev {
+            Event::Key(event) => {
+                match event.code {
+                    KeyCode::Char(ch @ ('1' | '2' | '3' | '4' | ' ')) => {
+                        grade = match ch {
+                            '1' => Grade::Again,
+                            '2' => Grade::Hard,
+                            '3' => Grade::Good,
+                            '4' => Grade::Easy,
+                            ' ' => Grade::Easy,
+                            _ => unreachable!(),
+                        };
+                        break
+                    }
+                    _ => {}
+                };
+            }
+            _ => {}
+        }
+    }
+    Ok(grade)
 }
 
 fn review_again(
@@ -243,13 +274,16 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Review { retention } => {
             let mut state = State::new()?;
+            execute!(std::io::stdout(), EnterAlternateScreen)?;
+            crossterm::terminal::enable_raw_mode()?;
+
             for card in &state.cards {
                 let id = str::from_utf8(&base64::to_base64(card.id))
                     .expect("This is always valid utf8")
                     .to_string();
                 match state.data.fsrs_params.entry(id) {
                     Entry::Occupied(mut entry) => {
-                        review_again(entry.get_mut(), &card, retention.clamp(0.0, 1.0));
+                        review_again(entry.get_mut(), &card, retention.clamp(0.0, 1.0))?;
                     }
                     Entry::Vacant(entry) => {
                         let params = review_first_time(&card)?;
@@ -258,6 +292,9 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
             }
+
+            crossterm::terminal::disable_raw_mode()?;
+            execute!(std::io::stdout(), LeaveAlternateScreen)?;
             state.save()?;
         }
     }
