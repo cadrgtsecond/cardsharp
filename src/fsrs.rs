@@ -88,33 +88,42 @@ impl FSRSParams {
 // Most of these are simple sanity checks, or tests against hardcoded data
 // This should be fine since the algorithm shouldn't change often,
 // and even if it does, it should be reimplemented rather than modified
+//
 // In the future, we should implement more stronger testing,
 // by checking against a reference implementation,
 // or against real Anki user data
 #[cfg(test)]
 mod tests {
-    use std::f32::consts::E;
-
     use super::*;
 
     #[test]
-    pub fn sanity_check() {
+    pub fn initial_state() {
         let w = WEIGHTS;
         let grades = [Grade::Again, Grade::Hard, Grade::Good, Grade::Easy];
         let stabilities = &w[0..4];
+        let del = f32::exp(w[5]);
         let difficulties = [
             w[4],
-            w[4] - f32::exp(w[5]) + 1.0,
-            w[4] - f32::exp(w[5] * 2.0) + 1.0,
-            w[4] - f32::exp(w[5] * 3.0) + 1.0,
+            w[4] - del + 1.0,
+            w[4] - del * del + 1.0,
+            w[4] - del * del * del + 1.0,
         ];
 
         for i in 0..4 {
-            println!("{}", i);
             assert_eq!(
                 FSRSParams::from_initial_grade(grades[i]),
                 FSRSParams::new(stabilities[i], difficulties[i])
             );
+        }
+    }
+
+    #[test]
+    pub fn stability() {
+        let grades = [Grade::Again, Grade::Hard, Grade::Good, Grade::Easy];
+        for g in grades {
+            let card = FSRSParams::from_initial_grade(g);
+            // A card's stability is the number of days it takes for its recall to become 90%
+            assert_eq!(card.recall_probability(card.stability), 0.9);
         }
     }
 }
