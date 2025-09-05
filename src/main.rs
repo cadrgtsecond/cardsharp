@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, hash_map::Entry},
     fs::{File, OpenOptions},
-    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Stdin, Stdout, Write},
     path::PathBuf,
     process::{Command, Stdio},
     time::SystemTime,
@@ -94,7 +94,7 @@ fn initialize_cards() -> anyhow::Result<Vec<Card>> {
                 // TODO: Implement automated testing of adding ID's
                 println!("New card in found in {}", cardpath.to_string_lossy());
                 let id: u64 = rand::random();
-                let mut file = OpenOptions::new().read(true).write(true).open(&cardpath)?;
+                let mut file = OpenOptions::new().read(true).write(true).create(true).open(&cardpath)?;
                 let mut rest = String::new();
                 file.seek(SeekFrom::Start(written + off + 7))?;
                 file.read_to_string(&mut rest)?;
@@ -165,11 +165,7 @@ impl State {
 #[derive(Debug, Parser)]
 #[command(version)]
 enum Commands {
-    /// Initializes all cards under the current directory, state, and config
-    ///
-    /// This is equivalent to using `review` and immediately quitting.
-    /// Used mainly to add id's after `REVIEW:` without doing it manually
-    Init {},
+    /// Review all cards due
     Review {
         /// Target retention for study
         ///
@@ -177,11 +173,15 @@ enum Commands {
         #[arg(short, long, default_value = "0.9")]
         retention: f32,
     },
+
+    /// Initializes all cards under the current directory, state, and config
+    ///
+    /// This is equivalent to using `review` and immediately quitting.
+    /// Used mainly to add id's after `REVIEW:` without doing it manually
+    Init {},
 }
 
-fn review_again(card_params: &CardParams, card: &Card, retention: f32) {}
-
-fn review_first_time(card: &Card) -> anyhow::Result<CardParams> {
+fn review_card(card: &Card) -> anyhow::Result<Grade> {
     let mut stdin = BufReader::new(std::io::stdin());
     let mut stdout = std::io::stdout();
 
@@ -198,13 +198,35 @@ fn review_first_time(card: &Card) -> anyhow::Result<CardParams> {
 
     let mut buf = String::new();
     stdin.read_line(&mut buf)?;
-    let grade = match buf.trim() {
+    Ok(match buf.trim() {
         "1" => Grade::Again,
         "2" => Grade::Hard,
         "3" => Grade::Good,
         "4" => Grade::Easy,
         _ => Grade::Good,
+    })
+}
+
+fn review_again(
+    CardParams { last_review, fsrs }: &mut CardParams,
+    card: &Card,
+    retention: f32,
+) -> anyhow::Result<()> {
+    let days_elapsed = last_review.elapsed()?.as_secs_f32() / (60.0 * 60.0 * 24.0);
+    println!("{}", days_elapsed);
+    let r = fsrs.recall_probability(days_elapsed);
+    println!("{}", r);
+    if r < retention {
+        let grade = review_card(card)?;
+        if grade as u8 > 1 {
+            *fsrs = fsrs.update_successful(grade);
+        }
     };
+    Ok(())
+}
+
+fn review_first_time(card: &Card) -> anyhow::Result<CardParams> {
+    let grade = review_card(card)?;
 
     Ok(CardParams {
         last_review: SystemTime::now(),
@@ -226,8 +248,8 @@ fn main() -> anyhow::Result<()> {
                     .expect("This is always valid utf8")
                     .to_string();
                 match state.data.fsrs_params.entry(id) {
-                    Entry::Occupied(entry) => {
-                        review_again(entry.get(), &card, retention.clamp(0.0, 1.0));
+                    Entry::Occupied(mut entry) => {
+                        review_again(entry.get_mut(), &card, retention.clamp(0.0, 1.0));
                     }
                     Entry::Vacant(entry) => {
                         let params = review_first_time(&card)?;

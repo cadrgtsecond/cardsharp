@@ -72,7 +72,7 @@ impl FSRSParams {
         if g >= 3.0 {
             s2 = s2.max(s);
         }
-        Self::new(s2, 1.0)
+        Self::new(s2, self.difficulty)
     }
 
     /// Recall probability after `time` days
