@@ -2,6 +2,8 @@
 //! You are not expected to understand this.
 //!
 //! [fsrs]: https://github.com/open-spaced-repetition/free-spaced-repetition-scheduler
+// This makes the code easier to read if you understand the algorithm
+#![allow(clippy::many_single_char_names)]
 
 use serde::{Deserialize, Serialize};
 
@@ -33,15 +35,18 @@ impl FSRSParams {
     }
     pub fn from_initial_grade(grade: Grade) -> Self {
         let w = WEIGHTS;
-        let g = grade as u8 as f32;
+        let g = f32::from(grade as u8);
         // We need to use `new` here because the value of difficulty should be clamped
         // Otherwise, the difficulty for `Grade::Easy` will end up negative
-        Self::new(w[g as usize - 1], w[4] - f32::exp(w[5] * (g - 1.0)) + 1.0)
+        Self::new(
+            w[grade as usize - 1],
+            w[4] - f32::exp(w[5] * (g - 1.0)) + 1.0,
+        )
     }
 
     pub fn update_successful(self, grade: Grade) -> Self {
         let w = WEIGHTS;
-        let g = grade as u8 as f32;
+        let g = f32::from(grade as u8);
         let s = self.stability;
         let d = self.difficulty;
         let r = self.recall_probability(0.0);
@@ -63,7 +68,7 @@ impl FSRSParams {
 
     pub fn update_same_day(self, grade: Grade) -> Self {
         let w = WEIGHTS;
-        let g = grade as u8 as f32;
+        let g = f32::from(grade as u8);
         let s = self.stability;
 
         let sinc = f32::exp(w[17] * (g - 3.0 + w[18])) * s.powf(-w[19]);
@@ -123,7 +128,7 @@ mod tests {
         for g in grades {
             let card = FSRSParams::from_initial_grade(g);
             // A card's stability is the number of days it takes for its recall to become 90%
-            assert_eq!(card.recall_probability(card.stability), 0.9);
+            assert!((card.recall_probability(card.stability) - 0.9).abs() < 0.01);
         }
     }
 }

@@ -1,7 +1,7 @@
+#![deny(clippy::pedantic)]
+
 use clap::Parser;
-use crossterm::{
-    cursor::MoveTo, event::{Event, KeyCode}, execute, terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen}
-};
+use crossterm::{execute, terminal::{EnterAlternateScreen, LeaveAlternateScreen}};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, hash_map::Entry},
@@ -12,10 +12,9 @@ use std::{
     time::SystemTime,
 };
 
-use crate::fsrs::{FSRSParams, Grade};
-
 mod base64;
 mod fsrs;
+mod ui;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Card {
@@ -49,7 +48,7 @@ fn parse_title(mut title: &str) -> Option<(u64, &str)> {
     Some((base64::from_base64(id.as_bytes().try_into().ok()?)?, title))
 }
 
-fn initialize_cards() -> anyhow::Result<Vec<Card>> {
+fn find_cards() -> anyhow::Result<Vec<Card>> {
     // TODO: Support other searching commands, such as `grep -R` or `ag`
     let grep_result = Command::new("rg")
         .arg("-g")
@@ -61,7 +60,7 @@ fn initialize_cards() -> anyhow::Result<Vec<Card>> {
     let grep_result = String::from_utf8_lossy(&grep_result.stdout);
     let data = grep_result.split('\n').filter_map(|s| {
         let (filename, rest) = s.split_once('\0')?;
-        let (byte_off_str, _content) = rest.split_once(":")?;
+        let (byte_off_str, _content) = rest.split_once(':')?;
 
         Some((PathBuf::from(filename), byte_off_str.parse::<u64>().ok()?))
     });
@@ -91,30 +90,30 @@ fn initialize_cards() -> anyhow::Result<Vec<Card>> {
             body.push_str(&next_line);
         }
 
-        let (id, title) = match parse_title(&title) {
-            Some((id, title)) => (id, String::from(title)),
-            None => {
-                // TODO: Implement automated testing of adding ID's
-                println!("New card in found in {}", cardpath.to_string_lossy());
-                let id: u64 = rand::random();
-                let mut file = OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create(true)
-                    .open(&cardpath)?;
-                let mut rest = String::new();
-                file.seek(SeekFrom::Start(written + off + 7))?;
-                file.read_to_string(&mut rest)?;
+        let (id, title) = if let Some((id, title)) = parse_title(&title) {
+            (id, String::from(title))
+        } else {
+            // TODO: Implement automated testing of adding ID's
+            println!("New card in found in {}", cardpath.to_string_lossy());
+            let id: u64 = rand::random();
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&cardpath)?;
+            let mut rest = String::new();
+            file.seek(SeekFrom::Start(written + off + 7))?;
+            file.read_to_string(&mut rest)?;
 
-                file.seek(SeekFrom::Start(written + off + 7))?;
-                written += file.write(b" __")? as u64;
-                written += file.write(&base64::to_base64(id))? as u64;
-                file.write(rest.as_bytes())? as u64;
-                (
-                    id,
-                    String::from(&rest[0..rest.find('\n').unwrap_or(rest.len())]),
-                )
-            }
+            file.seek(SeekFrom::Start(written + off + 7))?;
+            written += file.write(b" __")? as u64;
+            written += file.write(&base64::to_base64(id))? as u64;
+            _ = file.write(rest.as_bytes())?;
+            (
+                id,
+                String::from(&rest[0..rest.find('\n').unwrap_or(rest.len())]),
+            )
         };
         Ok(Card { id, title, body })
     })
@@ -151,8 +150,9 @@ impl State {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(data_path)?;
-        let cards = initialize_cards()?;
+        let cards = find_cards()?;
         let data = serde_json::from_reader(&data_file).unwrap_or_else(|_| Data::default());
 
         Ok(State {
@@ -188,83 +188,6 @@ enum Commands {
     Init {},
 }
 
-fn review_card(card: &Card) -> anyhow::Result<Grade> {
-    let mut stdin = BufReader::new(std::io::stdin());
-    let mut stdout = std::io::stdout();
-
-    execute!(stdout, MoveTo(0, 0))?;
-    execute!(stdout, Clear(ClearType::All))?;
-    print!("{}\r\nPress any key to show backside...", card.title.trim());
-    stdout.flush()?;
-
-    loop {
-        let ev = crossterm::event::read()?;
-        println!("{:?}", ev);
-        match ev {
-            Event::Key(_) => break,
-            _ => {}
-        }
-    }
-
-    execute!(stdout, MoveTo(0, 0))?;
-    execute!(stdout, Clear(ClearType::All))?;
-    println!("{}\r", card.body.trim());
-    println!("1:again\t2: hard\t3/space: good\t4: easy");
-
-    let grade;
-    loop {
-        let ev = crossterm::event::read()?;
-        println!("{:?}", ev);
-        match ev {
-            Event::Key(event) => {
-                match event.code {
-                    KeyCode::Char(ch @ ('1' | '2' | '3' | '4' | ' ')) => {
-                        grade = match ch {
-                            '1' => Grade::Again,
-                            '2' => Grade::Hard,
-                            '3' => Grade::Good,
-                            '4' => Grade::Easy,
-                            ' ' => Grade::Easy,
-                            _ => unreachable!(),
-                        };
-                        break
-                    }
-                    _ => {}
-                };
-            }
-            _ => {}
-        }
-    }
-    Ok(grade)
-}
-
-fn review_again(
-    CardParams { last_review, fsrs }: &mut CardParams,
-    card: &Card,
-    retention: f32,
-) -> anyhow::Result<()> {
-    let days_elapsed = last_review.elapsed()?.as_secs_f32() / (60.0 * 60.0 * 24.0);
-    println!("{}", days_elapsed);
-    let r = fsrs.recall_probability(days_elapsed);
-    println!("{}", r);
-    if r < retention {
-        let grade = review_card(card)?;
-        if grade as u8 > 1 {
-            *fsrs = fsrs.update_successful(grade);
-        }
-    };
-    Ok(())
-}
-
-fn review_first_time(card: &Card) -> anyhow::Result<CardParams> {
-    let grade = review_card(card)?;
-
-    Ok(CardParams {
-        last_review: SystemTime::now(),
-        fsrs: FSRSParams::from_initial_grade(grade),
-    })
-}
-
 fn main() -> anyhow::Result<()> {
     let command = Commands::parse();
     match command {
@@ -283,11 +206,10 @@ fn main() -> anyhow::Result<()> {
                     .to_string();
                 match state.data.fsrs_params.entry(id) {
                     Entry::Occupied(mut entry) => {
-                        review_again(entry.get_mut(), &card, retention.clamp(0.0, 1.0))?;
+                        ui::review_again(entry.get_mut(), card, retention.clamp(0.0, 1.0))?;
                     }
                     Entry::Vacant(entry) => {
-                        let params = review_first_time(&card)?;
-                        println!("{:?}", params);
+                        let params = ui::review_first_time(card)?;
                         entry.insert(params);
                     }
                 }
@@ -302,26 +224,27 @@ fn main() -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unreadable_literal)]
 mod tests {
     use super::*;
     #[test]
     pub fn parsing_title() {
         // Valid formats
         assert_eq!(
-            parse_id_from_title("REVIEW:__+KkJkFEm3+M"),
-            Some(17917863107911671779)
+            parse_title("REVIEW:__+KkJkFEm3+M test"),
+            Some((17917863107911671779, " test"))
         );
         assert_eq!(
-            parse_id_from_title("REVIEW:  __ayBz0QJqjYk"),
-            Some(7719297102838926729)
+            parse_title("REVIEW:  __ayBz0QJqjYk"),
+            Some((7719297102838926729, ""))
         );
         assert_eq!(
-            parse_id_from_title("__/nr0HfQpvoM"),
-            Some(18337237242280001155)
+            parse_title("__/nr0HfQpvoM test"),
+            Some((18337237242280001155, "test"))
         );
 
         // Invalid formats
-        assert_eq!(parse_id_from_title("db02tXj37Co"), None);
-        assert_eq!(parse_id_from_title("__9OgKjjs"), None);
+        assert_eq!(parse_title("db02tXj37Co"), None);
+        assert_eq!(parse_title("__9OgKjjs"), None);
     }
 }

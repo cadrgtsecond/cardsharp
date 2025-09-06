@@ -1,5 +1,4 @@
 //! Base64 encoding and decoding
-
 pub type Base64 = [u8; 11];
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -28,6 +27,7 @@ pub fn from_base64(data: Base64) -> Option<u64> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unreadable_literal)]
 mod tests {
     use super::*;
 
