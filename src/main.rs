@@ -58,22 +58,23 @@ fn find_cards() -> anyhow::Result<Vec<Card>> {
         .stdin(Stdio::null())
         .output()?;
     let grep_result = String::from_utf8_lossy(&grep_result.stdout);
-    let data = grep_result.split('\n').filter_map(|s| {
+    let mut data = grep_result.split('\n').filter_map(|s| {
         let (filename, rest) = s.split_once('\0')?;
         let (byte_off_str, _content) = rest.split_once(':')?;
 
         Some((PathBuf::from(filename), byte_off_str.parse::<u64>().ok()?))
     });
 
+    let Some((mut prev_path, _)) = data.next() else {
+        return Ok(vec![]);
+    };
+    let mut file = BufReader::new(File::open(&prev_path)?);
     let mut written = 0;
-    let mut prev_path = None;
-    // ⊔ would make my life a whole lot easier
-    // TODO: Avoid opening the same file multiple times
     data.map(|(cardpath, off)| -> anyhow::Result<_> {
-        let mut file = BufReader::new(File::open(&cardpath)?);
-        if Some(&cardpath) != prev_path.as_ref() {
+        if cardpath != prev_path {
+            prev_path = cardpath.clone();
             written = 0;
-            prev_path = Some(cardpath.clone());
+            file = BufReader::new(File::open(&cardpath)?);
         }
 
         file.seek(SeekFrom::Start(written + off))?;
