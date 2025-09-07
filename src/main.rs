@@ -39,8 +39,8 @@ fn parse_title(mut title: &str) -> Option<(u64, &str)> {
         return None;
     }
     title = &title[2..];
-    let (id, title) = title.split_once(char::is_whitespace)?;
-    Some((base64::from_base64(id.as_bytes().try_into().ok()?)?, title))
+    let (id, title) = title.split_once(char::is_whitespace).unwrap_or((title, ""));
+    Some((base64::from_base64(id)?, title))
 }
 
 fn find_cards() -> anyhow::Result<Vec<Card>> {
@@ -104,7 +104,7 @@ fn find_cards() -> anyhow::Result<Vec<Card>> {
 
             file.seek(SeekFrom::Start(written + off + 7))?;
             written += file.write(b" __")? as u64;
-            written += file.write(&base64::to_base64(id))? as u64;
+            written += file.write(base64::to_base64(id).as_bytes())? as u64;
             _ = file.write(rest.as_bytes())?;
             (
                 id,
@@ -159,9 +159,7 @@ fn main() -> anyhow::Result<()> {
             loop {
                 let mut iters = 0;
                 for card in &cards {
-                    let id = str::from_utf8(&base64::to_base64(card.id))
-                        .expect("This is always valid utf8")
-                        .to_string();
+                    let id = base64::to_base64(card.id);
                     match data.fsrs_params.entry(id) {
                         Entry::Occupied(mut entry) => {
                             let CardParams { last_review, fsrs } = entry.get_mut();
@@ -207,15 +205,15 @@ mod tests {
     pub fn parsing_title() {
         // Valid formats
         assert_eq!(
-            parse_title("REVIEW:__+KkJkFEm3+M test"),
-            Some((17917863107911671779, " test"))
+            parse_title("REVIEW:__+KkJkFEm3+M= test"),
+            Some((17917863107911671779, "test"))
         );
         assert_eq!(
-            parse_title("REVIEW:  __ayBz0QJqjYk"),
+            parse_title("REVIEW:  __ayBz0QJqjYk="),
             Some((7719297102838926729, ""))
         );
         assert_eq!(
-            parse_title("__/nr0HfQpvoM test"),
+            parse_title("__/nr0HfQpvoM= test"),
             Some((18337237242280001155, "test"))
         );
 
