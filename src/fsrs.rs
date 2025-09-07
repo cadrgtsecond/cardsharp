@@ -12,7 +12,7 @@ const WEIGHTS: [f32; 21] = [
     0.0614, 0.2629, 1.6483, 0.6014, 1.8729, 0.5425, 0.0912, 0.0658, 0.1542,
 ];
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub enum Grade {
     Again = 1,
     Hard = 2,
@@ -20,10 +20,10 @@ pub enum Grade {
     Easy = 4,
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FSRSParams {
-    stability: f32,
-    difficulty: f32,
+    pub stability: f32,
+    pub difficulty: f32,
 }
 
 impl FSRSParams {

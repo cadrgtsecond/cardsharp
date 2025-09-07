@@ -1,22 +1,27 @@
 #![deny(clippy::pedantic)]
 
 use clap::Parser;
-use crossterm::{execute, terminal::{EnterAlternateScreen, LeaveAlternateScreen}};
+use crossterm::{
+    execute,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen},
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, hash_map::Entry},
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     time::SystemTime,
 };
+
+use crate::fsrs::Grade;
 
 mod base64;
 mod fsrs;
 mod ui;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Card {
     id: u64,
     #[serde(skip)]
@@ -60,21 +65,21 @@ fn find_cards() -> anyhow::Result<Vec<Card>> {
     let grep_result = String::from_utf8_lossy(&grep_result.stdout);
     let mut data = grep_result.split('\n').filter_map(|s| {
         let (filename, rest) = s.split_once('\0')?;
-        let (byte_off_str, _content) = rest.split_once(':')?;
+        let (byte_off_str, _) = rest.split_once(':')?;
 
-        Some((PathBuf::from(filename), byte_off_str.parse::<u64>().ok()?))
+        Some((Path::new(filename), byte_off_str.parse::<u64>().ok()?))
     });
 
     let Some((mut prev_path, _)) = data.next() else {
         return Ok(vec![]);
     };
-    let mut file = BufReader::new(File::open(&prev_path)?);
+    let mut file = BufReader::new(File::open(prev_path)?);
     let mut written = 0;
     data.map(|(cardpath, off)| -> anyhow::Result<_> {
         if cardpath != prev_path {
-            prev_path = cardpath.clone();
+            prev_path = cardpath;
             written = 0;
-            file = BufReader::new(File::open(&cardpath)?);
+            file = BufReader::new(File::open(cardpath)?);
         }
 
         file.seek(SeekFrom::Start(written + off))?;
@@ -102,7 +107,7 @@ fn find_cards() -> anyhow::Result<Vec<Card>> {
                 .write(true)
                 .create(true)
                 .truncate(false)
-                .open(&cardpath)?;
+                .open(cardpath)?;
             let mut rest = String::new();
             file.seek(SeekFrom::Start(written + off + 7))?;
             file.read_to_string(&mut rest)?;
@@ -123,51 +128,36 @@ fn find_cards() -> anyhow::Result<Vec<Card>> {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct CardParams {
-    last_review: SystemTime,
-    fsrs: fsrs::FSRSParams,
+    pub last_review: SystemTime,
+    pub fsrs: fsrs::FSRSParams,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
-struct Data {
+pub struct Data {
     #[serde(default)]
     fsrs_params: HashMap<String, CardParams>,
 }
 
-#[derive(Debug)]
-struct State {
-    data: Data,
-    data_file: File,
-    cards: Vec<Card>,
+pub fn open_data() -> anyhow::Result<File> {
+    let mut path = data_path()?;
+    std::fs::create_dir_all(&path)?;
+
+    path.push("cards.json");
+    Ok(OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?)
 }
 
-impl State {
-    fn new() -> anyhow::Result<State> {
-        let mut data_path = data_path()?;
-        std::fs::create_dir_all(&data_path)?;
-
-        data_path.push("cards.json");
-
-        let data_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(data_path)?;
-        let cards = find_cards()?;
-        let data = serde_json::from_reader(&data_file).unwrap_or_else(|_| Data::default());
-
-        Ok(State {
-            data,
-            data_file,
-            cards,
-        })
-    }
-
-    fn save(&mut self) -> anyhow::Result<()> {
-        self.data_file.seek(SeekFrom::Start(0))?;
-        serde_json::to_writer(&mut self.data_file, &self.data)?;
-        Ok(())
-    }
+pub fn load_data(file: &mut File) -> anyhow::Result<Data> {
+    Ok(serde_json::from_reader(file).unwrap_or_else(|_| Data::default()))
+}
+pub fn save_data(file: &mut File, data: &Data) -> anyhow::Result<()> {
+    file.seek(SeekFrom::Start(0))?;
+    serde_json::to_writer(file, data)?;
+    Ok(())
 }
 
 #[derive(Debug, Parser)]
@@ -193,32 +183,55 @@ fn main() -> anyhow::Result<()> {
     let command = Commands::parse();
     match command {
         Commands::Init {} => {
-            let mut state = State::new()?;
-            state.save()?;
+            let _cards = find_cards()?;
+            let _file = open_data()?;
         }
         Commands::Review { retention } => {
-            let mut state = State::new()?;
+            let cards = find_cards()?;
+            let mut file = open_data()?;
+            let mut data = load_data(&mut file)?;
+
             execute!(std::io::stdout(), EnterAlternateScreen)?;
             crossterm::terminal::enable_raw_mode()?;
 
-            for card in &state.cards {
-                let id = str::from_utf8(&base64::to_base64(card.id))
-                    .expect("This is always valid utf8")
-                    .to_string();
-                match state.data.fsrs_params.entry(id) {
-                    Entry::Occupied(mut entry) => {
-                        ui::review_again(entry.get_mut(), card, retention.clamp(0.0, 1.0))?;
+            loop {
+                let mut iters = 0;
+                for card in &cards {
+                    let id = str::from_utf8(&base64::to_base64(card.id))
+                        .expect("This is always valid utf8")
+                        .to_string();
+                    match data.fsrs_params.entry(id) {
+                        Entry::Occupied(mut entry) => {
+                            let CardParams { last_review, fsrs } = entry.get_mut();
+                            // We add one extra day so that we don't have to review after a short time
+                            let days_elapsed =
+                                1.0 + last_review.elapsed()?.as_secs_f32() / (60.0 * 60.0 * 24.0);
+
+                            if fsrs.recall_probability(days_elapsed) >= retention {
+                                continue;
+                            }
+                            iters += 1;
+                            let grade = ui::review_card(&card)?;
+
+                            if grade != Grade::Again {
+                                *fsrs = fsrs.update_successful(grade);
+                            }
+                        }
+                        Entry::Vacant(entry) => {
+                            iters += 1;
+                            let params = ui::review_first_time(&card)?;
+                            entry.insert(params);
+                        }
                     }
-                    Entry::Vacant(entry) => {
-                        let params = ui::review_first_time(card)?;
-                        entry.insert(params);
-                    }
+                }
+                if iters == 0 {
+                    break;
                 }
             }
 
             crossterm::terminal::disable_raw_mode()?;
             execute!(std::io::stdout(), LeaveAlternateScreen)?;
-            state.save()?;
+            save_data(&mut file, &data)?;
         }
     }
     Ok(())

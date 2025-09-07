@@ -42,7 +42,7 @@ fn print_question(stdout: &mut Stdout, question: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn review_card(card: &Card) -> anyhow::Result<Grade> {
+pub fn review_card(card: &Card) -> anyhow::Result<Grade> {
     let mut stdout = std::io::stdout();
     let winsize = terminal::window_size()?;
     let question = card.title.trim();
@@ -90,22 +90,6 @@ fn review_card(card: &Card) -> anyhow::Result<Grade> {
         }
     }
     Ok(grade)
-}
-
-pub fn review_again(
-    CardParams { last_review, fsrs }: &mut CardParams,
-    card: &Card,
-    retention: f32,
-) -> anyhow::Result<()> {
-    let days_elapsed = last_review.elapsed()?.as_secs_f32() / (60.0 * 60.0 * 24.0);
-    let r = fsrs.recall_probability(days_elapsed);
-    if r < retention {
-        let grade = review_card(card)?;
-        if grade as u8 > 1 {
-            *fsrs = fsrs.update_successful(grade);
-        }
-    }
-    Ok(())
 }
 
 pub fn review_first_time(card: &Card) -> anyhow::Result<CardParams> {
