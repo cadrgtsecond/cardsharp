@@ -7,10 +7,10 @@ use crossterm::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::hash_map::Entry,
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
-    path::{Path, PathBuf},
+    path::Path,
     process::{Command, Stdio},
     time::SystemTime,
 };
@@ -20,23 +20,13 @@ use crate::fsrs::Grade;
 mod base64;
 mod fsrs;
 mod ui;
+mod data;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 struct Card {
     id: u64,
-    #[serde(skip)]
     title: String,
-    #[serde(skip)]
     body: String,
-}
-
-fn data_path() -> anyhow::Result<PathBuf> {
-    let mut home = PathBuf::from(std::env::var("HOME")?);
-    home.push(".local/share/cardsharp");
-
-    Ok(std::env::var("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or(home))
 }
 
 /// Parses a title, returning the base64 id and the actual title
@@ -132,34 +122,6 @@ struct CardParams {
     pub fsrs: fsrs::FSRSParams,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
-pub struct Data {
-    #[serde(default)]
-    fsrs_params: HashMap<String, CardParams>,
-}
-
-pub fn open_data() -> anyhow::Result<File> {
-    let mut path = data_path()?;
-    std::fs::create_dir_all(&path)?;
-
-    path.push("cards.json");
-    Ok(OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)?)
-}
-
-pub fn load_data(file: &mut File) -> anyhow::Result<Data> {
-    Ok(serde_json::from_reader(file).unwrap_or_else(|_| Data::default()))
-}
-pub fn save_data(file: &mut File, data: &Data) -> anyhow::Result<()> {
-    file.seek(SeekFrom::Start(0))?;
-    serde_json::to_writer(file, data)?;
-    Ok(())
-}
-
 #[derive(Debug, Parser)]
 #[command(version)]
 enum Commands {
@@ -184,12 +146,12 @@ fn main() -> anyhow::Result<()> {
     match command {
         Commands::Init {} => {
             let _cards = find_cards()?;
-            let _file = open_data()?;
+            let _file = data::open_data()?;
         }
         Commands::Review { retention } => {
             let cards = find_cards()?;
-            let mut file = open_data()?;
-            let mut data = load_data(&mut file)?;
+            let mut file = data::open_data()?;
+            let mut data = data::load_data(&mut file);
 
             execute!(std::io::stdout(), EnterAlternateScreen)?;
             crossterm::terminal::enable_raw_mode()?;
@@ -211,7 +173,7 @@ fn main() -> anyhow::Result<()> {
                                 continue;
                             }
                             iters += 1;
-                            let grade = ui::review_card(&card)?;
+                            let grade = ui::review_card(card)?;
 
                             if grade != Grade::Again {
                                 *fsrs = fsrs.update_successful(grade);
@@ -219,7 +181,7 @@ fn main() -> anyhow::Result<()> {
                         }
                         Entry::Vacant(entry) => {
                             iters += 1;
-                            let params = ui::review_first_time(&card)?;
+                            let params = ui::review_first_time(card)?;
                             entry.insert(params);
                         }
                     }
@@ -231,7 +193,7 @@ fn main() -> anyhow::Result<()> {
 
             crossterm::terminal::disable_raw_mode()?;
             execute!(std::io::stdout(), LeaveAlternateScreen)?;
-            save_data(&mut file, &data)?;
+            data::save_data(&mut file, &data)?;
         }
     }
     Ok(())
