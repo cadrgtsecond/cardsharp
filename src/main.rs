@@ -5,51 +5,37 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen},
 };
-use serde::{Deserialize, Serialize};
 use std::{
-    collections::hash_map::Entry,
-    fs::{File, OpenOptions},
-    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
+    collections::HashMap,
+    fs::File,
+    io::{BufRead, BufReader, Seek, SeekFrom},
     path::Path,
     process::{Command, Stdio},
     time::SystemTime,
 };
 
-use crate::fsrs::Grade;
+use crate::data::ReviewParams;
 
 mod base64;
+mod data;
 mod fsrs;
 mod ui;
-mod data;
 
 #[derive(Debug, Clone)]
 struct Card {
     id: u64,
     title: String,
     body: String,
+    review_params: Option<ReviewParams>,
 }
 
-/// Parses a title, returning the base64 id and the actual title
-fn parse_title(mut title: &str) -> Option<(u64, &str)> {
-    if title.starts_with("REVIEW:") {
-        title = &title[7..];
-    }
-    title = title.trim_start();
-    if !title.starts_with("__") {
-        return None;
-    }
-    title = &title[2..];
-    let (id, title) = title.split_once(char::is_whitespace).unwrap_or((title, ""));
-    Some((base64::from_base64(id)?, title))
-}
-
-fn find_cards() -> anyhow::Result<Vec<Card>> {
+fn find_cards(params: &HashMap<String, ReviewParams>) -> anyhow::Result<Vec<Card>> {
     // TODO: Support other searching commands, such as `grep -R` or `ag`
     let grep_result = Command::new("rg")
         .arg("-g")
         .arg("*.{md,adoc,txt}")
         .arg("-0b")
-        .arg("REVIEW:")
+        .arg("REVIEW: __[a-zA-Z0-9+/]{11}=")
         .stdin(Stdio::null())
         .output()?;
     let grep_result = String::from_utf8_lossy(&grep_result.stdout);
@@ -64,62 +50,41 @@ fn find_cards() -> anyhow::Result<Vec<Card>> {
         return Ok(vec![]);
     };
     let mut file = BufReader::new(File::open(prev_path)?);
-    let mut written = 0;
-    data.map(|(cardpath, off)| -> anyhow::Result<_> {
-        if cardpath != prev_path {
-            prev_path = cardpath;
-            written = 0;
-            file = BufReader::new(File::open(cardpath)?);
-        }
-
-        file.seek(SeekFrom::Start(written + off))?;
-        let mut title = String::new();
-        file.read_line(&mut title)?;
-
-        let mut body = String::new();
-        loop {
-            let mut next_line = String::new();
-            file.read_line(&mut next_line)?;
-            if next_line.starts_with("REVIEW:") || next_line == "---\n" || next_line.is_empty() {
-                break;
+    Ok(data
+        .filter_map(|(cardpath, off)| {
+            if cardpath != prev_path {
+                prev_path = cardpath;
+                file = BufReader::new(File::open(cardpath).ok()?);
             }
-            body.push_str(&next_line);
-        }
+            file.seek(SeekFrom::Start(off)).ok()?;
+            let mut title = String::new();
+            file.read_line(&mut title).ok()?;
 
-        let (id, title) = if let Some((id, title)) = parse_title(&title) {
-            (id, String::from(title))
-        } else {
-            // TODO: Implement automated testing of adding ID's
-            println!("New card in found in {}", cardpath.to_string_lossy());
-            let id: u64 = rand::random();
-            let mut file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(cardpath)?;
-            let mut rest = String::new();
-            file.seek(SeekFrom::Start(written + off + 7))?;
-            file.read_to_string(&mut rest)?;
+            let title = title
+                .strip_prefix("REVIEW:")?
+                .trim_start()
+                .strip_prefix("__")?;
 
-            file.seek(SeekFrom::Start(written + off + 7))?;
-            written += file.write(b" __")? as u64;
-            written += file.write(base64::to_base64(id).as_bytes())? as u64;
-            _ = file.write(rest.as_bytes())?;
-            (
+            let (id_str, title) = title.split_once(char::is_whitespace).unwrap_or((title, ""));
+            let id = base64::from_base64(id_str)?;
+
+            let mut body = String::new();
+            loop {
+                let mut line = String::new();
+                file.read_line(&mut line).ok()?;
+                if line == "---\n" || line.starts_with("REVIEW:") {
+                    break;
+                }
+                body.push_str(&line);
+            }
+            Some(Card {
                 id,
-                String::from(&rest[0..rest.find('\n').unwrap_or(rest.len())]),
-            )
-        };
-        Ok(Card { id, title, body })
-    })
-    .collect()
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct CardParams {
-    pub last_review: SystemTime,
-    pub fsrs: fsrs::FSRSParams,
+                title: title.to_string(),
+                body,
+                review_params: params.get(id_str).cloned(),
+            })
+        })
+        .collect())
 }
 
 #[derive(Debug, Parser)]
@@ -134,10 +99,7 @@ enum Commands {
         retention: f32,
     },
 
-    /// Initializes all cards under the current directory, state, and config
-    ///
-    /// This is equivalent to using `review` and immediately quitting.
-    /// Used mainly to add id's after `REVIEW:` without doing it manually
+    /// Initializes all cards under the current directory, adding id's to them if they did not exist
     Init {},
 }
 
@@ -145,24 +107,22 @@ fn main() -> anyhow::Result<()> {
     let command = Commands::parse();
     match command {
         Commands::Init {} => {
-            let _cards = find_cards()?;
-            let _file = data::open_data()?;
+            // TODO: Actually initialize card
         }
         Commands::Review { retention } => {
-            let cards = find_cards()?;
             let mut file = data::open_data()?;
             let mut data = data::load_data(&mut file);
+            let mut cards = find_cards(&data.review_params)?;
 
             execute!(std::io::stdout(), EnterAlternateScreen)?;
             crossterm::terminal::enable_raw_mode()?;
 
             loop {
                 let mut iters = 0;
-                for card in &cards {
+                for card in &mut cards {
                     let id = base64::to_base64(card.id);
-                    match data.fsrs_params.entry(id) {
-                        Entry::Occupied(mut entry) => {
-                            let CardParams { last_review, fsrs } = entry.get_mut();
+                    let new_params =
+                        if let Some(ReviewParams { last_review, fsrs }) = card.review_params {
                             // We add one extra day so that we don't have to review after a short time
                             let days_elapsed =
                                 1.0 + last_review.elapsed()?.as_secs_f32() / (60.0 * 60.0 * 24.0);
@@ -173,16 +133,15 @@ fn main() -> anyhow::Result<()> {
                             iters += 1;
                             let grade = ui::review_card(card)?;
 
-                            if grade != Grade::Again {
-                                *fsrs = fsrs.update_successful(grade);
+                            ReviewParams {
+                                last_review: SystemTime::now(),
+                                fsrs: fsrs.update_successful(grade),
                             }
-                        }
-                        Entry::Vacant(entry) => {
+                        } else {
                             iters += 1;
-                            let params = ui::review_first_time(card)?;
-                            entry.insert(params);
-                        }
-                    }
+                            ui::review_first_time(card)?
+                        };
+                    data.review_params.insert(id, new_params);
                 }
                 if iters == 0 {
                     break;
@@ -195,30 +154,4 @@ fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-#[allow(clippy::unreadable_literal)]
-mod tests {
-    use super::*;
-    #[test]
-    pub fn parsing_title() {
-        // Valid formats
-        assert_eq!(
-            parse_title("REVIEW:__+KkJkFEm3+M= test"),
-            Some((17917863107911671779, "test"))
-        );
-        assert_eq!(
-            parse_title("REVIEW:  __ayBz0QJqjYk="),
-            Some((7719297102838926729, ""))
-        );
-        assert_eq!(
-            parse_title("__/nr0HfQpvoM= test"),
-            Some((18337237242280001155, "test"))
-        );
-
-        // Invalid formats
-        assert_eq!(parse_title("db02tXj37Co"), None);
-        assert_eq!(parse_title("__9OgKjjs"), None);
-    }
 }

@@ -1,13 +1,19 @@
-use std::{collections::HashMap, fs::{File, OpenOptions}, io::{Seek, SeekFrom}, path::PathBuf};
+use std::{collections::HashMap, fs::{File, OpenOptions}, io::{Seek, SeekFrom}, path::PathBuf, time::SystemTime};
 
 use serde::{Deserialize, Serialize};
 
-use crate::CardParams;
+use crate::fsrs::FSRSParams;
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Data {
     #[serde(default)]
-    pub fsrs_params: HashMap<String, CardParams>,
+    pub review_params: HashMap<String, ReviewParams>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewParams {
+    pub last_review: SystemTime,
+    pub fsrs: FSRSParams,
 }
 
 fn data_path() -> anyhow::Result<PathBuf> {
@@ -37,6 +43,7 @@ pub fn load_data(file: &mut File) -> Data {
 }
 
 pub fn save_data(file: &mut File, data: &Data) -> anyhow::Result<()> {
+    file.set_len(0)?;
     file.seek(SeekFrom::Start(0))?;
     serde_json::to_writer(file, data)?;
     Ok(())

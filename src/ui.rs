@@ -12,8 +12,7 @@ use crossterm::{
 };
 
 use crate::{
-    Card, CardParams,
-    fsrs::{FSRSParams, Grade},
+    data::ReviewParams, fsrs::{FSRSParams, Grade}, Card
 };
 
 const SPACES: &str = "\r\n\n";
@@ -92,10 +91,10 @@ pub fn review_card(card: &Card) -> anyhow::Result<Grade> {
     Ok(grade)
 }
 
-pub fn review_first_time(card: &Card) -> anyhow::Result<CardParams> {
+pub fn review_first_time(card: &Card) -> anyhow::Result<ReviewParams> {
     let grade = review_card(card)?;
 
-    Ok(CardParams {
+    Ok(ReviewParams {
         last_review: SystemTime::now(),
         fsrs: FSRSParams::from_initial_grade(grade),
     })

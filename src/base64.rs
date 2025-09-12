@@ -16,6 +16,7 @@ pub fn from_base64(data: &str) -> Option<u64> {
         return None;
     }
     for (idx, i) in data.chars().enumerate() {
+        // TODO: Read MSB properly and treat padding properly
         if i == '=' {
             break;
         }
