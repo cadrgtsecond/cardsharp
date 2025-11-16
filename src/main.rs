@@ -1,90 +1,114 @@
 #![deny(clippy::pedantic)]
 
+use base64::{Engine, prelude::BASE64_STANDARD};
 use clap::Parser;
 use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::{
-    collections::HashMap,
-    fs::File,
-    io::{BufRead, BufReader, Seek, SeekFrom},
-    path::Path,
-    process::{Command, Stdio},
-    time::SystemTime,
+    fs::OpenOptions,
+    io::{Read, Seek, SeekFrom, Write},
+    path::PathBuf,
+    time::{Duration, SystemTime},
 };
 
-use crate::data::ReviewParams;
+use crate::fsrs::FSRSParams;
 
-mod base64;
-mod data;
 mod fsrs;
 mod ui;
 
-#[derive(Debug, Clone)]
-struct Card {
-    id: u64,
-    title: String,
-    body: String,
-    review_params: Option<ReviewParams>,
+/// Cards have 6 byte identifiers.
+/// This is so that they can be conveniently represented in base64 as 8 characters
+#[derive(Debug, Copy, Clone)]
+struct CardId(pub [u8; 6]);
+
+impl CardId {
+    fn as_int(&self) -> u64 {
+        let mut res = 0;
+        for b in self.0 {
+            res = res | b as u64;
+            res = res << 8;
+        }
+        res
+    }
 }
 
-fn find_cards(params: &HashMap<String, ReviewParams>) -> anyhow::Result<Vec<Card>> {
-    // TODO: Support other searching commands, such as `grep -R` or `ag`
-    let grep_result = Command::new("rg")
-        .arg("-g")
-        .arg("*.{md,adoc,txt}")
-        .arg("-0b")
-        .arg("REVIEW: __[a-zA-Z0-9+/]{11}=")
-        .stdin(Stdio::null())
-        .output()?;
-    let grep_result = String::from_utf8_lossy(&grep_result.stdout);
-    let mut data = grep_result.split('\n').filter_map(|s| {
-        let (filename, rest) = s.split_once('\0')?;
-        let (byte_off_str, _) = rest.split_once(':')?;
+struct CardBody {
+    id: CardId,
+    front: String,
+    back: String,
+}
 
-        Some((Path::new(filename), byte_off_str.parse::<u64>().ok()?))
-    });
-
-    let Some((mut prev_path, _)) = data.next() else {
-        return Ok(vec![]);
-    };
-    let mut file = BufReader::new(File::open(prev_path)?);
-    Ok(data
-        .filter_map(|(cardpath, off)| {
-            if cardpath != prev_path {
-                prev_path = cardpath;
-                file = BufReader::new(File::open(cardpath).ok()?);
-            }
-            file.seek(SeekFrom::Start(off)).ok()?;
-            let mut title = String::new();
-            file.read_line(&mut title).ok()?;
-
-            let title = title
-                .strip_prefix("REVIEW:")?
-                .trim_start()
-                .strip_prefix("__")?;
-
-            let (id_str, title) = title.split_once(char::is_whitespace).unwrap_or((title, ""));
-            let id = base64::from_base64(id_str)?;
-
-            let mut body = String::new();
-            loop {
-                let mut line = String::new();
-                file.read_line(&mut line).ok()?;
-                if line == "---\n" || line.starts_with("REVIEW:") {
-                    break;
-                }
-                body.push_str(&line);
-            }
-            Some(Card {
-                id,
-                title: title.to_string(),
-                body,
-                review_params: params.get(id_str).cloned(),
-            })
+/// Initializes any uninitialized cards with their own Id.
+/// Returns a list of Ids
+fn initialize_card_bodies(data: &mut String) -> Vec<CardId> {
+    let is: Vec<usize> = data
+        .lines()
+        .filter(|i| i.starts_with("REVIEW:"))
+        .map(|i| (i.as_ptr() as usize) - (data.as_ptr() as usize))
+        .collect();
+    is.iter()
+        .rev()
+        .map(|i| {
+            let newid = CardId(rand::random());
+            data.insert_str(*i + "REVIEW".len(), "--");
+            data.insert_str(*i + "REVIEW--".len(), &BASE64_STANDARD.encode(newid.0));
+            newid
         })
-        .collect())
+        .collect()
+}
+
+/// Loads cards from the given string representing a file
+fn load_card_bodies(data: &str) -> Vec<CardBody> {
+    let mut res = vec![];
+    let mut lines = data.lines().peekable();
+    loop {
+        let Some(i) = lines.next() else { break };
+
+        if !i.starts_with("REVIEW--") {
+            continue;
+        }
+        let i = &i["REVIEW--".len()..];
+
+        let Some(end) = i.find(':') else { continue };
+        let id = i[0..end].as_bytes();
+        let i = &i[end + 1..];
+
+        let Ok(id) = BASE64_STANDARD.decode(id) else {
+            continue;
+        };
+        let Ok(id) = id.try_into() else { continue };
+        let id = CardId(id);
+
+        let front = i.to_string();
+        let mut back = String::new();
+        loop {
+            let Some(i) = lines.peek() else { break };
+            if i.starts_with("REVIEW--") {
+                break;
+            }
+            let Some(i) = lines.next() else { break };
+            back.push_str(i);
+            back.push_str("\n");
+        }
+
+        res.push(CardBody { id, front, back });
+    }
+    res
+}
+
+fn init_database(sqlite: &mut rusqlite::Connection) -> anyhow::Result<()> {
+    sqlite.execute(
+        "create table if not exists review(
+             card int,
+             last_reviewed int,
+             stability real,
+             difficulty real
+        )",
+        (),
+    )?;
+    Ok(())
 }
 
 #[derive(Debug, Parser)]
@@ -97,51 +121,109 @@ enum Commands {
         /// Clamped between 0.0 and 1.0
         #[arg(short, long, default_value = "0.9")]
         retention: f32,
+        files: Vec<PathBuf>,
     },
 
-    /// Initializes all cards under the current directory, adding id's to them if they did not exist
-    Init {},
+    /// Initializes all specified files in the database
+    /// usually unnecessary
+    Init { files: Vec<PathBuf> },
+}
+
+fn update_review_data(sqlite: &mut rusqlite::Connection, id: CardId, fsrs: FSRSParams) -> anyhow::Result<()> {
+    sqlite.execute(
+        "insert into review(card, last_reviewed, stability, difficulty)
+                                     values (?1, ?2, ?3, ?4)",
+        (
+            id.as_int(),
+            SystemTime::UNIX_EPOCH.elapsed()?.as_secs(),
+            fsrs.stability,
+            fsrs.difficulty,
+        ),
+    )?;
+    Ok(())
 }
 
 fn main() -> anyhow::Result<()> {
     let command = Commands::parse();
     match command {
-        Commands::Init {} => {
-            // TODO: Actually initialize card
+        Commands::Init { files } => {
+            for file in files {
+                let mut file = OpenOptions::new().read(true).write(true).open(file)?;
+                let mut data = String::new();
+                file.read_to_string(&mut data)?;
+
+                let ids = initialize_card_bodies(&mut data);
+                for i in ids {
+                    eprintln!("Initialized new card!: {}", BASE64_STANDARD.encode(i.0));
+                }
+
+                file.seek(SeekFrom::Start(0))?;
+                file.write(data.as_bytes())?;
+            }
         }
-        Commands::Review { retention } => {
-            let mut file = data::open_data()?;
-            let mut data = data::load_data(&mut file);
-            let mut cards = find_cards(&data.review_params)?;
+        Commands::Review { retention, files } => {
+            let cards: Vec<Vec<CardBody>> = files
+                .into_iter()
+                .map(|file| {
+                    let mut file = OpenOptions::new().read(true).write(true).open(file)?;
+                    let mut data = String::new();
+                    file.read_to_string(&mut data)?;
+
+                    let ids = initialize_card_bodies(&mut data);
+                    for i in ids {
+                        eprintln!("Initialized new card!: {}", BASE64_STANDARD.encode(i.0));
+                    }
+                    Ok(load_card_bodies(&data))
+                })
+                .collect::<anyhow::Result<_>>()?;
+            let cards: Vec<_> = cards.into_iter().flatten().collect();
+
+            let mut sqlite = rusqlite::Connection::open("db.sqlite3")?;
+            init_database(&mut sqlite)?;
 
             execute!(std::io::stdout(), EnterAlternateScreen)?;
             crossterm::terminal::enable_raw_mode()?;
 
             loop {
                 let mut iters = 0;
-                for card in &mut cards {
-                    let id = base64::to_base64(card.id);
-                    let new_params =
-                        if let Some(ReviewParams { last_review, fsrs }) = card.review_params {
-                            // We add one extra day so that we don't have to review after a short time
-                            let days_elapsed =
-                                1.0 + last_review.elapsed()?.as_secs_f32() / (60.0 * 60.0 * 24.0);
+                for card in cards.iter() {
+                    let (last_reviewed, fsrs) = sqlite
+                        .query_row(
+                            "select last_reviewed, stability, difficulty from review
+                                 where card = ?1
+                                 order by last_reviewed desc
+                                 limit 1",
+                            [card.id.as_int()],
+                            |row| {
+                                Ok((
+                                    SystemTime::UNIX_EPOCH + Duration::from_secs(row.get(0)?),
+                                    Some(FSRSParams {
+                                        stability: row.get(1)?,
+                                        difficulty: row.get(2)?,
+                                    }),
+                                ))
+                            },
+                        )
+                        .unwrap_or_else(|_| (SystemTime::now(), None));
+                    let days_elapsed =
+                        last_reviewed.elapsed()?.as_secs_f32() / (60.0 * 60.0 * 24.0);
 
-                            if fsrs.recall_probability(days_elapsed) >= retention {
-                                continue;
-                            }
-                            iters += 1;
+                    match fsrs {
+                        Some(fsrs) if fsrs.recall_probability(days_elapsed) < retention => {
                             let grade = ui::review_card(card)?;
 
-                            ReviewParams {
-                                last_review: SystemTime::now(),
-                                fsrs: fsrs.update_successful(grade),
-                            }
-                        } else {
+                            let fsrs = fsrs.update_successful(grade);
                             iters += 1;
-                            ui::review_first_time(card)?
-                        };
-                    data.review_params.insert(id, new_params);
+                            update_review_data(&mut sqlite, card.id, fsrs)?
+                        }
+                        None => {
+                            let grade = ui::review_card(card)?;
+                            let fsrs = FSRSParams::from_initial_grade(grade);
+                            iters += 1;
+                            update_review_data(&mut sqlite, card.id, fsrs)?
+                        }
+                        _ => {}
+                    }
                 }
                 if iters == 0 {
                     break;
@@ -150,7 +232,6 @@ fn main() -> anyhow::Result<()> {
 
             crossterm::terminal::disable_raw_mode()?;
             execute!(std::io::stdout(), LeaveAlternateScreen)?;
-            data::save_data(&mut file, &data)?;
         }
     }
     Ok(())

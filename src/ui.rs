@@ -11,9 +11,7 @@ use crossterm::{
     terminal::{self, Clear, ClearType, WindowSize},
 };
 
-use crate::{
-    data::ReviewParams, fsrs::{FSRSParams, Grade}, Card
-};
+use crate::{fsrs::Grade, CardBody};
 
 const SPACES: &str = "\r\n\n";
 
@@ -41,10 +39,10 @@ fn print_question(stdout: &mut Stdout, question: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn review_card(card: &Card) -> anyhow::Result<Grade> {
+pub fn review_card(card: &CardBody) -> anyhow::Result<Grade> {
     let mut stdout = std::io::stdout();
     let winsize = terminal::window_size()?;
-    let question = card.title.trim();
+    let question = card.front.trim();
 
     execute!(&mut stdout, MoveTo(0, 0))?;
     execute!(&mut stdout, Clear(ClearType::All))?;
@@ -66,7 +64,7 @@ pub fn review_card(card: &Card) -> anyhow::Result<Grade> {
 
     print!(
         "{}{SPACES}1:again\t2: hard\t3/space: good\t4: easy",
-        card.body.trim()
+        card.back.trim()
     );
     stdout.flush()?;
 
@@ -89,13 +87,4 @@ pub fn review_card(card: &Card) -> anyhow::Result<Grade> {
         }
     }
     Ok(grade)
-}
-
-pub fn review_first_time(card: &Card) -> anyhow::Result<ReviewParams> {
-    let grade = review_card(card)?;
-
-    Ok(ReviewParams {
-        last_review: SystemTime::now(),
-        fsrs: FSRSParams::from_initial_grade(grade),
-    })
 }
