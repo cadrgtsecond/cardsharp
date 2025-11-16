@@ -1,7 +1,4 @@
-use std::{
-    io::{Stdout, Write},
-    time::SystemTime,
-};
+use std::io::{Stdout, Write};
 
 use crossterm::{
     cursor::MoveTo,
@@ -11,7 +8,7 @@ use crossterm::{
     terminal::{self, Clear, ClearType, WindowSize},
 };
 
-use crate::{fsrs::Grade, CardBody};
+use crate::{CardBody, fsrs::Grade};
 
 const SPACES: &str = "\r\n\n";
 

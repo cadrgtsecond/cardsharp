@@ -24,11 +24,11 @@ mod ui;
 struct CardId(pub [u8; 6]);
 
 impl CardId {
-    fn as_int(&self) -> u64 {
+    fn as_int(self) -> u64 {
         let mut res = 0;
         for b in self.0 {
-            res = res | b as u64;
-            res = res << 8;
+            res |= u64::from(b);
+            res <<= 8;
         }
         res
     }
@@ -72,7 +72,7 @@ fn load_card_bodies(data: &str) -> Vec<CardBody> {
         let i = &i["REVIEW--".len()..];
 
         let Some(end) = i.find(':') else { continue };
-        let id = i[0..end].as_bytes();
+        let id = &i.as_bytes()[0..end];
         let i = &i[end + 1..];
 
         let Ok(id) = BASE64_STANDARD.decode(id) else {
@@ -90,7 +90,7 @@ fn load_card_bodies(data: &str) -> Vec<CardBody> {
             }
             let Some(i) = lines.next() else { break };
             back.push_str(i);
-            back.push_str("\n");
+            back.push('\n');
         }
 
         res.push(CardBody { id, front, back });
@@ -129,7 +129,11 @@ enum Commands {
     Init { files: Vec<PathBuf> },
 }
 
-fn update_review_data(sqlite: &mut rusqlite::Connection, id: CardId, fsrs: FSRSParams) -> anyhow::Result<()> {
+fn update_review_data(
+    sqlite: &mut rusqlite::Connection,
+    id: CardId,
+    fsrs: FSRSParams,
+) -> anyhow::Result<()> {
     sqlite.execute(
         "insert into review(card, last_reviewed, stability, difficulty)
                                      values (?1, ?2, ?3, ?4)",
@@ -158,7 +162,7 @@ fn main() -> anyhow::Result<()> {
                 }
 
                 file.seek(SeekFrom::Start(0))?;
-                file.write(data.as_bytes())?;
+                file.write_all(data.as_bytes())?;
             }
         }
         Commands::Review { retention, files } => {
@@ -186,7 +190,7 @@ fn main() -> anyhow::Result<()> {
 
             loop {
                 let mut iters = 0;
-                for card in cards.iter() {
+                for card in &cards {
                     let (last_reviewed, fsrs) = sqlite
                         .query_row(
                             "select last_reviewed, stability, difficulty from review
@@ -214,13 +218,13 @@ fn main() -> anyhow::Result<()> {
 
                             let fsrs = fsrs.update_successful(grade);
                             iters += 1;
-                            update_review_data(&mut sqlite, card.id, fsrs)?
+                            update_review_data(&mut sqlite, card.id, fsrs)?;
                         }
                         None => {
                             let grade = ui::review_card(card)?;
                             let fsrs = FSRSParams::from_initial_grade(grade);
                             iters += 1;
-                            update_review_data(&mut sqlite, card.id, fsrs)?
+                            update_review_data(&mut sqlite, card.id, fsrs)?;
                         }
                         _ => {}
                     }
