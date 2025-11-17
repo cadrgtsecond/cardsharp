@@ -214,14 +214,22 @@ fn main() -> anyhow::Result<()> {
 
                     match fsrs {
                         Some(fsrs) if fsrs.recall_probability(days_elapsed) < retention => {
-                            let grade = ui::review_card(card)?;
+                            let Some(grade) = ui::review_card(card)? else {
+                                crossterm::terminal::disable_raw_mode()?;
+                                execute!(std::io::stdout(), LeaveAlternateScreen)?;
+                                return Ok(());
+                            };
 
                             let fsrs = fsrs.update_successful(grade);
                             iters += 1;
                             update_review_data(&mut sqlite, card.id, fsrs)?;
                         }
                         None => {
-                            let grade = ui::review_card(card)?;
+                            let Some(grade) = ui::review_card(card)? else {
+                                crossterm::terminal::disable_raw_mode()?;
+                                execute!(std::io::stdout(), LeaveAlternateScreen)?;
+                                return Ok(());
+                            };
                             let fsrs = FSRSParams::from_initial_grade(grade);
                             iters += 1;
                             update_review_data(&mut sqlite, card.id, fsrs)?;
