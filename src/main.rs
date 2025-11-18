@@ -254,7 +254,7 @@ fn main() -> anyhow::Result<()> {
             init_database(&mut sqlite)?;
 
             for (i, card) in cards.iter().enumerate() {
-                println!("{}. {}", (i + 1).to_string(), card.front.trim().bold());
+                println!("{}. {}", (i + 1).to_string(), ui::hide_cloze(card.front.trim()).bold());
                 let res = load_card_data(&mut sqlite, card.id);
                 match res {
                     Some((last_reviewed, fsrs)) => {

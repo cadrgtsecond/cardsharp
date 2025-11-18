@@ -12,6 +12,22 @@ use crate::{CardBody, fsrs::Grade};
 
 const SPACES: &str = "\r\n\n";
 
+pub fn hide_cloze(ques: &str) -> String {
+    let mut hidden = false;
+    ques.chars()
+        .filter_map(|c| {
+            if c == '_' {
+                hidden = !hidden;
+                None
+            } else if hidden {
+                Some('_')
+            } else {
+                Some(c)
+            }
+        })
+        .collect()
+}
+
 fn title(stdout: &mut Stdout, winsize: &WindowSize) -> anyhow::Result<()> {
     let header_text = "CARDSHARP\r\n\n";
     execute!(
@@ -47,7 +63,7 @@ pub fn review_card(card: &CardBody) -> anyhow::Result<Option<Grade>> {
     loop {
         execute!(&mut stdout, MoveTo(0, 0), Clear(ClearType::All))?;
         title(&mut stdout, &winsize)?;
-        print_question(&mut stdout, front)?;
+        print_question(&mut stdout, &hide_cloze(front))?;
         print!("Press any key to show backside....");
         stdout.flush()?;
 
