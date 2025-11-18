@@ -257,10 +257,15 @@ fn main() -> anyhow::Result<()> {
                 println!("{}. {}", (i + 1).to_string(), card.front.trim().bold());
                 let res = load_card_data(&mut sqlite, card.id);
                 match res {
-                    Some((_last_reviewed, fsrs)) => {
+                    Some((last_reviewed, fsrs)) => {
+                        let days_elapsed =
+                            last_reviewed.elapsed()?.as_secs_f32() / (60.0 * 60.0 * 24.0);
+                        let recall = fsrs.recall_probability(days_elapsed);
                         println!(
-                            "stability: {:.2?}\ndifficulty: {:.2?}",
-                            fsrs.stability, fsrs.difficulty
+                            "stability: {:.2?}\ndifficulty: {:.2?}\npredicted recall: {:.2}%",
+                            fsrs.stability,
+                            fsrs.difficulty,
+                            recall * 100.0
                         );
                     }
                     None => {
@@ -268,14 +273,7 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
 
-                let back = card.back.trim();
-                if back.is_empty() {
-                    println!("");
-                } else if back.len() > 20 {
-                    println!("{}...\n", &back[0..20]);
-                } else {
-                    println!("{}\n", back);
-                }
+                println!();
             }
         }
     }
