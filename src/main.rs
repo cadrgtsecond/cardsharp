@@ -4,12 +4,13 @@ use base64::{Engine, prelude::BASE64_STANDARD};
 use clap::Parser;
 use crossterm::{
     execute,
+    style::Stylize,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::{
     fs::OpenOptions,
     io::{Read, Seek, SeekFrom, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
 
@@ -127,6 +128,9 @@ enum Commands {
     /// Initializes all specified files in the database
     /// usually unnecessary
     Init { files: Vec<PathBuf> },
+
+    /// Lists all cards in the given file
+    Cards { files: Vec<PathBuf> },
 }
 
 fn update_review_data(
@@ -147,36 +151,58 @@ fn update_review_data(
     Ok(())
 }
 
+fn load_file(file: &Path) -> anyhow::Result<String> {
+    let mut file = OpenOptions::new().read(true).write(true).open(file)?;
+    let mut data = String::new();
+    file.read_to_string(&mut data)?;
+
+    let ids = initialize_card_bodies(&mut data);
+    for i in ids {
+        eprintln!("Initialized new card!: {}", BASE64_STANDARD.encode(i.0));
+    }
+
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(data.as_bytes())?;
+    Ok(data)
+}
+
+fn load_card_data(
+    sqlite: &mut rusqlite::Connection,
+    id: CardId,
+) -> Option<(SystemTime, FSRSParams)> {
+    sqlite
+        .query_row(
+            "select last_reviewed, stability, difficulty from review
+                 where card = ?1
+                 order by last_reviewed desc
+                 limit 1",
+            [id.as_int()],
+            |row| {
+                Ok((
+                    SystemTime::UNIX_EPOCH + Duration::from_secs(row.get(0)?),
+                    FSRSParams {
+                        stability: row.get(1)?,
+                        difficulty: row.get(2)?,
+                    },
+                ))
+            },
+        )
+        .ok()
+}
+
 fn main() -> anyhow::Result<()> {
     let command = Commands::parse();
     match command {
         Commands::Init { files } => {
             for file in files {
-                let mut file = OpenOptions::new().read(true).write(true).open(file)?;
-                let mut data = String::new();
-                file.read_to_string(&mut data)?;
-
-                let ids = initialize_card_bodies(&mut data);
-                for i in ids {
-                    eprintln!("Initialized new card!: {}", BASE64_STANDARD.encode(i.0));
-                }
-
-                file.seek(SeekFrom::Start(0))?;
-                file.write_all(data.as_bytes())?;
+                _ = load_file(&file)?
             }
         }
         Commands::Review { retention, files } => {
             let cards: Vec<Vec<CardBody>> = files
                 .into_iter()
                 .map(|file| {
-                    let mut file = OpenOptions::new().read(true).write(true).open(file)?;
-                    let mut data = String::new();
-                    file.read_to_string(&mut data)?;
-
-                    let ids = initialize_card_bodies(&mut data);
-                    for i in ids {
-                        eprintln!("Initialized new card!: {}", BASE64_STANDARD.encode(i.0));
-                    }
+                    let data = load_file(&file)?;
                     Ok(load_card_bodies(&data))
                 })
                 .collect::<anyhow::Result<_>>()?;
@@ -188,36 +214,20 @@ fn main() -> anyhow::Result<()> {
             execute!(std::io::stdout(), EnterAlternateScreen)?;
             crossterm::terminal::enable_raw_mode()?;
 
-            loop {
+            'main: loop {
                 let mut iters = 0;
                 for card in &cards {
-                    let (last_reviewed, fsrs) = sqlite
-                        .query_row(
-                            "select last_reviewed, stability, difficulty from review
-                                 where card = ?1
-                                 order by last_reviewed desc
-                                 limit 1",
-                            [card.id.as_int()],
-                            |row| {
-                                Ok((
-                                    SystemTime::UNIX_EPOCH + Duration::from_secs(row.get(0)?),
-                                    Some(FSRSParams {
-                                        stability: row.get(1)?,
-                                        difficulty: row.get(2)?,
-                                    }),
-                                ))
-                            },
-                        )
-                        .unwrap_or_else(|_| (SystemTime::now(), None));
-                    let days_elapsed =
-                        last_reviewed.elapsed()?.as_secs_f32() / (60.0 * 60.0 * 24.0);
+                    let res = load_card_data(&mut sqlite, card.id);
+                    match res {
+                        Some((last_reviewed, fsrs)) => {
+                            let days_elapsed =
+                                last_reviewed.elapsed()?.as_secs_f32() / (60.0 * 60.0 * 24.0);
 
-                    match fsrs {
-                        Some(fsrs) if fsrs.recall_probability(days_elapsed) < retention => {
+                            if fsrs.recall_probability(days_elapsed) >= retention {
+                                continue;
+                            }
                             let Some(grade) = ui::review_card(card)? else {
-                                crossterm::terminal::disable_raw_mode()?;
-                                execute!(std::io::stdout(), LeaveAlternateScreen)?;
-                                return Ok(());
+                                break 'main;
                             };
 
                             let fsrs = fsrs.update_successful(grade);
@@ -226,15 +236,12 @@ fn main() -> anyhow::Result<()> {
                         }
                         None => {
                             let Some(grade) = ui::review_card(card)? else {
-                                crossterm::terminal::disable_raw_mode()?;
-                                execute!(std::io::stdout(), LeaveAlternateScreen)?;
-                                return Ok(());
+                                break 'main;
                             };
                             let fsrs = FSRSParams::from_initial_grade(grade);
                             iters += 1;
                             update_review_data(&mut sqlite, card.id, fsrs)?;
                         }
-                        _ => {}
                     }
                 }
                 if iters == 0 {
@@ -244,6 +251,41 @@ fn main() -> anyhow::Result<()> {
 
             crossterm::terminal::disable_raw_mode()?;
             execute!(std::io::stdout(), LeaveAlternateScreen)?;
+        }
+        Commands::Cards { files } => {
+            let cards: Vec<Vec<CardBody>> = files
+                .into_iter()
+                .map(|file| {
+                    let data = load_file(&file)?;
+                    Ok(load_card_bodies(&data))
+                })
+                .collect::<anyhow::Result<_>>()?;
+            let cards: Vec<_> = cards.into_iter().flatten().collect();
+            let mut sqlite = rusqlite::Connection::open("db.sqlite3")?;
+            init_database(&mut sqlite)?;
+
+            for (i, card) in cards.into_iter().enumerate() {
+                println!("{}. {}\n", (i + 1).to_string(), card.front.trim().bold());
+                let res = load_card_data(&mut sqlite, card.id);
+                match res {
+                    Some((_last_reviewed, fsrs)) => {
+                        println!(
+                            "stability: {:.2?}\ndifficulty: {:.2?}\n",
+                            fsrs.stability, fsrs.difficulty
+                        );
+                    }
+                    None => {
+                        println!("{}", "Not yet reviewed".dark_grey());
+                    }
+                }
+
+                let back = card.back.trim();
+                if back.len() > 20 {
+                    println!("{}...\n\n", &back[0..20]);
+                } else {
+                    println!("{}\n\n", back);
+                }
+            }
         }
     }
     Ok(())
