@@ -4,13 +4,11 @@ use crossterm::{
     cursor::MoveTo,
     event::{Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
-    style::{Color, Colors, Print, SetColors},
+    style::{Print, Stylize},
     terminal::{self, Clear, ClearType, WindowSize},
 };
 
 use crate::{CardBody, fsrs::Grade};
-
-const SPACES: &str = "\r\n\n";
 
 pub fn hide_cloze(ques: &str) -> String {
     let mut hidden = false;
@@ -36,9 +34,7 @@ fn title(stdout: &mut Stdout, winsize: &WindowSize) -> anyhow::Result<()> {
             (winsize.columns - header_text.len().try_into().unwrap_or(u16::MAX)) / 2,
             0
         ),
-        SetColors(Colors::new(Color::Black, Color::Red)),
-        Print(header_text),
-        SetColors(Colors::new(Color::Reset, Color::Reset)),
+        Print(header_text.red()),
     )?;
     Ok(())
 }
@@ -46,10 +42,8 @@ fn title(stdout: &mut Stdout, winsize: &WindowSize) -> anyhow::Result<()> {
 fn print_question(stdout: &mut Stdout, question: &str) -> anyhow::Result<()> {
     execute!(
         stdout,
-        SetColors(Colors::new(Color::Yellow, Color::Black)),
-        Print("REVIEW: "),
-        SetColors(Colors::new(Color::Reset, Color::Reset)),
-        Print(format!("{question}{SPACES}"))
+        Print("REVIEW: ".yellow()),
+        Print(format!("{question}\r\n\n"))
     )?;
     Ok(())
 }
@@ -91,7 +85,7 @@ pub fn review_card(card: &CardBody) -> anyhow::Result<Option<Grade>> {
         execute!(&mut stdout, MoveTo(0, 0), Clear(ClearType::All))?;
         title(&mut stdout, &winsize)?;
         print_question(&mut stdout, front)?;
-        print!("{}{SPACES}1:again\t2: hard\t3/space: good\t4: easy", back);
+        print!("{}\r\n\n1:again\t2: hard\t3/space: good\t4: easy", back);
         stdout.flush()?;
 
         match crossterm::event::read()? {
