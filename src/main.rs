@@ -64,37 +64,32 @@ fn initialize_card_bodies(data: &mut String) -> Vec<CardId> {
 fn load_card_bodies(data: &str) -> Vec<CardBody> {
     let mut res = vec![];
     let mut lines = data.lines().peekable();
-    loop {
-        let Some(i) = lines.next() else { break };
-
-        if !i.starts_with("REVIEW--") {
+    while let Some(i) = lines.next() {
+        let Some(i) = i.strip_prefix("REVIEW--") else {
             continue;
-        }
-        let i = &i["REVIEW--".len()..];
+        };
 
-        let Some(end) = i.find(':') else { continue };
-        let id = &i.as_bytes()[0..end];
-        let i = &i[end + 1..];
+        let Some((id, i)) = i.find(':').map(|idx| i.split_at(idx)) else {
+            continue;
+        };
+        let front = i[1..].to_string();
 
         let Ok(id) = BASE64_STANDARD.decode(id) else {
             continue;
         };
         let Ok(id) = id.try_into() else { continue };
-        let id = CardId(id);
 
-        let front = i.to_string();
         let mut back = String::new();
-        loop {
-            let Some(i) = lines.peek() else { break };
-            if i.starts_with("REVIEW--") {
-                break;
-            }
-            let Some(i) = lines.next() else { break };
+        while let Some(i) = lines.next_if(|l| !l.starts_with("REVIEW--")) {
             back.push_str(i);
             back.push('\n');
         }
 
-        res.push(CardBody { id, front, back });
+        res.push(CardBody {
+            id: CardId(id),
+            front,
+            back,
+        });
     }
     res
 }
@@ -122,14 +117,16 @@ enum Commands {
         /// Clamped between 0.0 and 1.0
         #[arg(short, long, default_value = "0.9")]
         retention: f32,
+        /// List of files to look for cards
         files: Vec<PathBuf>,
     },
 
-    /// Initializes all specified files in the database
-    /// usually unnecessary
+    /// Initializes all the given cards in the database
+    ///
+    /// usually unnecessary to do manually, as all commands automatically do this by default
     Init { files: Vec<PathBuf> },
 
-    /// Lists all cards in the given file
+    /// Lists all the cards in the given file
     Cards { files: Vec<PathBuf> },
 }
 
@@ -194,19 +191,16 @@ fn main() -> anyhow::Result<()> {
     let command = Commands::parse();
     match command {
         Commands::Init { files } => {
-            for file in files {
-                _ = load_file(&file)?
+            for file in &files {
+                _ = load_file(file)?
             }
         }
         Commands::Review { retention, files } => {
-            let cards: Vec<Vec<CardBody>> = files
-                .into_iter()
-                .map(|file| {
-                    let data = load_file(&file)?;
-                    Ok(load_card_bodies(&data))
-                })
-                .collect::<anyhow::Result<_>>()?;
-            let cards: Vec<_> = cards.into_iter().flatten().collect();
+            let mut cards = Vec::new();
+            for file in &files {
+                let data = load_file(file)?;
+                cards.append(&mut load_card_bodies(&data));
+            }
 
             let mut sqlite = rusqlite::Connection::open("db.sqlite3")?;
             init_database(&mut sqlite)?;
@@ -218,7 +212,7 @@ fn main() -> anyhow::Result<()> {
                 let mut iters = 0;
                 for card in &cards {
                     let res = load_card_data(&mut sqlite, card.id);
-                    match res {
+                    let fsrs = match res {
                         Some((last_reviewed, fsrs)) => {
                             let days_elapsed =
                                 last_reviewed.elapsed()?.as_secs_f32() / (60.0 * 60.0 * 24.0);
@@ -229,20 +223,17 @@ fn main() -> anyhow::Result<()> {
                             let Some(grade) = ui::review_card(card)? else {
                                 break 'main;
                             };
-
-                            let fsrs = fsrs.update_successful(grade);
-                            iters += 1;
-                            update_review_data(&mut sqlite, card.id, fsrs)?;
+                            fsrs.update_successful(grade)
                         }
                         None => {
                             let Some(grade) = ui::review_card(card)? else {
                                 break 'main;
                             };
-                            let fsrs = FSRSParams::from_initial_grade(grade);
-                            iters += 1;
-                            update_review_data(&mut sqlite, card.id, fsrs)?;
+                            FSRSParams::from_initial_grade(grade)
                         }
-                    }
+                    };
+                    iters += 1;
+                    update_review_data(&mut sqlite, card.id, fsrs)?;
                 }
                 if iters == 0 {
                     break;
@@ -253,24 +244,22 @@ fn main() -> anyhow::Result<()> {
             execute!(std::io::stdout(), LeaveAlternateScreen)?;
         }
         Commands::Cards { files } => {
-            let cards: Vec<Vec<CardBody>> = files
-                .into_iter()
-                .map(|file| {
-                    let data = load_file(&file)?;
-                    Ok(load_card_bodies(&data))
-                })
-                .collect::<anyhow::Result<_>>()?;
-            let cards: Vec<_> = cards.into_iter().flatten().collect();
+            let mut cards = Vec::new();
+            for file in &files {
+                let data = load_file(file)?;
+                cards.append(&mut load_card_bodies(&data));
+            }
+
             let mut sqlite = rusqlite::Connection::open("db.sqlite3")?;
             init_database(&mut sqlite)?;
 
-            for (i, card) in cards.into_iter().enumerate() {
-                println!("{}. {}\n", (i + 1).to_string(), card.front.trim().bold());
+            for (i, card) in cards.iter().enumerate() {
+                println!("{}. {}", (i + 1).to_string(), card.front.trim().bold());
                 let res = load_card_data(&mut sqlite, card.id);
                 match res {
                     Some((_last_reviewed, fsrs)) => {
                         println!(
-                            "stability: {:.2?}\ndifficulty: {:.2?}\n",
+                            "stability: {:.2?}\ndifficulty: {:.2?}",
                             fsrs.stability, fsrs.difficulty
                         );
                     }
@@ -280,10 +269,12 @@ fn main() -> anyhow::Result<()> {
                 }
 
                 let back = card.back.trim();
-                if back.len() > 20 {
-                    println!("{}...\n\n", &back[0..20]);
+                if back.is_empty() {
+                    println!("");
+                } else if back.len() > 20 {
+                    println!("{}...\n", &back[0..20]);
                 } else {
-                    println!("{}\n\n", back);
+                    println!("{}\n", back);
                 }
             }
         }
