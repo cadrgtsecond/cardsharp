@@ -5,7 +5,7 @@ use crossterm::{
     event::{Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
     style::{Print, Stylize},
-    terminal::{self, Clear, ClearType, WindowSize},
+    terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, WindowSize},
 };
 
 use crate::{CardBody, fsrs::Grade};
@@ -54,6 +54,9 @@ pub fn review_card(card: &CardBody) -> anyhow::Result<Option<Grade>> {
     let front = card.front.trim();
     let back = card.back.trim();
 
+    execute!(&mut stdout, EnterAlternateScreen)?;
+    crossterm::terminal::enable_raw_mode()?;
+
     loop {
         execute!(&mut stdout, MoveTo(0, 0), Clear(ClearType::All))?;
         title(&mut stdout, &winsize)?;
@@ -81,11 +84,14 @@ pub fn review_card(card: &CardBody) -> anyhow::Result<Option<Grade>> {
         }
     }
 
-    loop {
+    let res = loop {
         execute!(&mut stdout, MoveTo(0, 0), Clear(ClearType::All))?;
         title(&mut stdout, &winsize)?;
         print_question(&mut stdout, front)?;
-        print!("{}\r\n\n1:again\t2: hard\t3/space: good\t4: easy", back);
+
+        crossterm::terminal::disable_raw_mode()?;
+        print!("{back}\n1:again\t2: hard\t3/space: good\t4: easy");
+        crossterm::terminal::enable_raw_mode()?;
         stdout.flush()?;
 
         match crossterm::event::read()? {
@@ -93,17 +99,20 @@ pub fn review_card(card: &CardBody) -> anyhow::Result<Option<Grade>> {
                 let grade = match event.code {
                     KeyCode::Char('1') => Grade::Again,
                     KeyCode::Char('2') => Grade::Hard,
-                    KeyCode::Char('3') => Grade::Good,
-                    KeyCode::Char('4' | ' ') => Grade::Easy,
-                    KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
+                    KeyCode::Char('3' | ' ') => Grade::Good,
+                    KeyCode::Char('4') => Grade::Easy,
+                    KeyCode::Esc | KeyCode::Char('q') => break Ok(None),
                     _ => continue,
                 };
-                return Ok(Some(grade));
+                break Ok(Some(grade));
             }
             Event::Resize(_, _) => {
                 winsize = terminal::window_size()?;
             }
             _ => {}
         }
-    }
+    };
+    crossterm::terminal::disable_raw_mode()?;
+    execute!(std::io::stdout(), LeaveAlternateScreen)?;
+    res
 }

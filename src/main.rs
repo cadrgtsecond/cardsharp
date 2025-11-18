@@ -2,11 +2,7 @@
 
 use base64::{Engine, prelude::BASE64_STANDARD};
 use clap::Parser;
-use crossterm::{
-    execute,
-    style::Stylize,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen},
-};
+use crossterm::style::Stylize;
 use std::{
     fs::OpenOptions,
     io::{Read, Seek, SeekFrom, Write},
@@ -192,7 +188,7 @@ fn main() -> anyhow::Result<()> {
     match command {
         Commands::Init { files } => {
             for file in &files {
-                _ = load_file(file)?
+                _ = load_file(file)?;
             }
         }
         Commands::Review { retention, files } => {
@@ -205,32 +201,26 @@ fn main() -> anyhow::Result<()> {
             let mut sqlite = rusqlite::Connection::open("db.sqlite3")?;
             init_database(&mut sqlite)?;
 
-            execute!(std::io::stdout(), EnterAlternateScreen)?;
-            crossterm::terminal::enable_raw_mode()?;
-
             'main: loop {
                 let mut iters = 0;
                 for card in &cards {
                     let res = load_card_data(&mut sqlite, card.id);
-                    let fsrs = match res {
-                        Some((last_reviewed, fsrs)) => {
-                            let days_elapsed =
-                                last_reviewed.elapsed()?.as_secs_f32() / (60.0 * 60.0 * 24.0);
+                    let fsrs = if let Some((last_reviewed, fsrs)) = res {
+                        let days_elapsed =
+                            last_reviewed.elapsed()?.as_secs_f32() / (60.0 * 60.0 * 24.0);
 
-                            if fsrs.recall_probability(days_elapsed) >= retention {
-                                continue;
-                            }
-                            let Some(grade) = ui::review_card(card)? else {
-                                break 'main;
-                            };
-                            fsrs.update_successful(grade)
+                        if fsrs.recall_probability(days_elapsed) >= retention {
+                            continue;
                         }
-                        None => {
-                            let Some(grade) = ui::review_card(card)? else {
-                                break 'main;
-                            };
-                            FSRSParams::from_initial_grade(grade)
-                        }
+                        let Some(grade) = ui::review_card(card)? else {
+                            break 'main;
+                        };
+                        fsrs.update_successful(grade)
+                    } else {
+                        let Some(grade) = ui::review_card(card)? else {
+                            break 'main;
+                        };
+                        FSRSParams::from_initial_grade(grade)
                     };
                     iters += 1;
                     update_review_data(&mut sqlite, card.id, fsrs)?;
@@ -239,9 +229,6 @@ fn main() -> anyhow::Result<()> {
                     break;
                 }
             }
-
-            crossterm::terminal::disable_raw_mode()?;
-            execute!(std::io::stdout(), LeaveAlternateScreen)?;
         }
         Commands::Cards { files } => {
             let mut cards = Vec::new();
@@ -254,23 +241,20 @@ fn main() -> anyhow::Result<()> {
             init_database(&mut sqlite)?;
 
             for (i, card) in cards.iter().enumerate() {
-                println!("{}. {}", (i + 1).to_string(), ui::hide_cloze(card.front.trim()).bold());
+                println!("{}. {}", i + 1, ui::hide_cloze(card.front.trim()).bold());
                 let res = load_card_data(&mut sqlite, card.id);
-                match res {
-                    Some((last_reviewed, fsrs)) => {
-                        let days_elapsed =
-                            last_reviewed.elapsed()?.as_secs_f32() / (60.0 * 60.0 * 24.0);
-                        let recall = fsrs.recall_probability(days_elapsed);
-                        println!(
-                            "stability: {:.2?}\ndifficulty: {:.2?}\npredicted recall: {:.2}%",
-                            fsrs.stability,
-                            fsrs.difficulty,
-                            recall * 100.0
-                        );
-                    }
-                    None => {
-                        println!("{}", "Not yet reviewed".dark_grey());
-                    }
+                if let Some((last_reviewed, fsrs)) = res {
+                    let days_elapsed =
+                        last_reviewed.elapsed()?.as_secs_f32() / (60.0 * 60.0 * 24.0);
+                    let recall = fsrs.recall_probability(days_elapsed);
+                    println!(
+                        "stability: {:.2?}\ndifficulty: {:.2?}\npredicted recall: {:.2}%",
+                        fsrs.stability,
+                        fsrs.difficulty,
+                        recall * 100.0
+                    );
+                } else {
+                    println!("{}", "Not yet reviewed".dark_grey());
                 }
 
                 println!();
