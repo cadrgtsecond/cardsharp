@@ -183,6 +183,21 @@ fn load_card_data(
         .ok()
 }
 
+fn open_db() -> anyhow::Result<rusqlite::Connection> {
+    let mut cardsharp_dir = std::env::var("CARDSHARP_DB")
+        .map(PathBuf::from)
+        .or_else(|_| {
+            std::env::var("HOME").map(|h| {
+                let mut p = PathBuf::from(h);
+                p.push(".local/share/cardsharp/");
+                p
+            })
+        })?;
+    _ = std::fs::create_dir(&cardsharp_dir);
+    cardsharp_dir.push("db.sqlite3");
+    Ok(rusqlite::Connection::open(cardsharp_dir)?)
+}
+
 fn main() -> anyhow::Result<()> {
     let command = Commands::parse();
     match command {
@@ -198,7 +213,7 @@ fn main() -> anyhow::Result<()> {
                 cards.append(&mut load_card_bodies(&data));
             }
 
-            let mut sqlite = rusqlite::Connection::open("db.sqlite3")?;
+            let mut sqlite = open_db()?;
             init_database(&mut sqlite)?;
 
             'main: loop {
@@ -237,7 +252,7 @@ fn main() -> anyhow::Result<()> {
                 cards.append(&mut load_card_bodies(&data));
             }
 
-            let mut sqlite = rusqlite::Connection::open("db.sqlite3")?;
+            let mut sqlite = open_db()?;
             init_database(&mut sqlite)?;
 
             for (i, card) in cards.iter().enumerate() {
