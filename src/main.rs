@@ -10,7 +10,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use crate::fsrs::FSRSParams;
+use crate::fsrs::{FSRSParams, Grade};
 
 mod fsrs;
 mod ui;
@@ -230,11 +230,19 @@ fn main() -> anyhow::Result<()> {
                         let Some(grade) = ui::review_card(card)? else {
                             break 'main;
                         };
+                        if let Grade::Again = grade {
+                            iters += 1;
+                            continue;
+                        }
                         fsrs.update_successful(grade)
                     } else {
                         let Some(grade) = ui::review_card(card)? else {
                             break 'main;
                         };
+                        if let Grade::Again = grade {
+                            iters += 1;
+                            continue;
+                        }
                         FSRSParams::from_initial_grade(grade)
                     };
                     iters += 1;
