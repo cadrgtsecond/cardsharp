@@ -3,6 +3,7 @@
 use base64::{Engine, prelude::BASE64_STANDARD};
 use clap::Parser;
 use crossterm::style::Stylize;
+use rand::seq::SliceRandom;
 use std::{
     fs::OpenOptions,
     io::{Read, Seek, SeekFrom, Write},
@@ -37,25 +38,6 @@ struct CardBody {
     back: String,
 }
 
-/// Initializes any uninitialized cards with their own Id.
-/// Returns a list of Ids
-fn initialize_card_bodies(data: &mut String) -> Vec<CardId> {
-    let is: Vec<usize> = data
-        .lines()
-        .filter(|i| i.starts_with("REVIEW:"))
-        .map(|i| (i.as_ptr() as usize) - (data.as_ptr() as usize))
-        .collect();
-    is.iter()
-        .rev()
-        .map(|i| {
-            let newid = CardId(rand::random());
-            data.insert_str(*i + "REVIEW".len(), "--");
-            data.insert_str(*i + "REVIEW--".len(), &BASE64_STANDARD.encode(newid.0));
-            newid
-        })
-        .collect()
-}
-
 /// Loads cards from the given string representing a file
 fn load_card_bodies(data: &str) -> Vec<CardBody> {
     let mut res = vec![];
@@ -88,19 +70,6 @@ fn load_card_bodies(data: &str) -> Vec<CardBody> {
         });
     }
     res
-}
-
-fn init_database(sqlite: &mut rusqlite::Connection) -> anyhow::Result<()> {
-    sqlite.execute(
-        "create table if not exists review(
-             card int,
-             last_reviewed int,
-             stability real,
-             difficulty real
-        )",
-        (),
-    )?;
-    Ok(())
 }
 
 #[derive(Debug, Parser)]
@@ -149,10 +118,17 @@ fn load_file(file: &Path) -> anyhow::Result<String> {
     let mut data = String::new();
     file.read_to_string(&mut data)?;
 
-    let ids = initialize_card_bodies(&mut data);
-    for i in ids {
-        eprintln!("Initialized new card!: {}", BASE64_STANDARD.encode(i.0));
-    }
+    let is: Vec<usize> = data.rmatch_indices("\nREVIEW:").map(|(i, _)| i).collect();
+    is.into_iter()
+        .map(|i| {
+            let newid = CardId(rand::random());
+            data.insert_str(i + "\nREVIEW".len(), "--");
+            data.insert_str(i + "\nREVIEW--".len(), &BASE64_STANDARD.encode(newid.0));
+            newid
+        })
+        .for_each(|i| {
+            eprintln!("Initialized new card!: {}", BASE64_STANDARD.encode(i.0));
+        });
 
     file.seek(SeekFrom::Start(0))?;
     file.write_all(data.as_bytes())?;
@@ -195,7 +171,17 @@ fn open_db() -> anyhow::Result<rusqlite::Connection> {
         })?;
     _ = std::fs::create_dir(&cardsharp_dir);
     cardsharp_dir.push("db.sqlite3");
-    Ok(rusqlite::Connection::open(cardsharp_dir)?)
+    let sqlite = rusqlite::Connection::open(cardsharp_dir)?;
+    sqlite.execute(
+        "create table if not exists review(
+             card int,
+             last_reviewed int,
+             stability real,
+             difficulty real
+        )",
+        (),
+    )?;
+    Ok(sqlite)
 }
 
 fn main() -> anyhow::Result<()> {
@@ -212,9 +198,9 @@ fn main() -> anyhow::Result<()> {
                 let data = load_file(file)?;
                 cards.append(&mut load_card_bodies(&data));
             }
+            cards.shuffle(&mut rand::rng());
 
             let mut sqlite = open_db()?;
-            init_database(&mut sqlite)?;
 
             'main: loop {
                 let mut iters = 0;
@@ -261,7 +247,6 @@ fn main() -> anyhow::Result<()> {
             }
 
             let mut sqlite = open_db()?;
-            init_database(&mut sqlite)?;
 
             for (i, card) in cards.iter().enumerate() {
                 println!("{}. {}", i + 1, ui::hide_cloze(card.front.trim()).bold());
