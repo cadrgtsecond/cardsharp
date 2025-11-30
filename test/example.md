@@ -1,6 +1,6 @@
 This card contains some example flashcards
 
-REVIEW--fguvqzmI: Where is the capital of India?
+REVIEW--fguvqzmI:: Where is the capital of India?
 New Delhi
 
 REVIEW--sWo4BDa0: FSRS stands for _Free Spaced Repetition Scheduling_ Algorithm

@@ -50,22 +50,37 @@ fn load_card_bodies(data: &str) -> Vec<CardBody> {
         let Some((id, i)) = i.find(':').map(|idx| i.split_at(idx)) else {
             continue;
         };
-        let front = i[1..].to_string();
+        let mut front = &i[1..];
 
         let Ok(id) = BASE64_STANDARD.decode(id) else {
             continue;
         };
-        let Ok(id) = id.try_into() else { continue };
+        let Ok(id) = id.try_into() else {
+            continue;
+        };
 
         let mut back = String::new();
-        while let Some(i) = lines.next_if(|l| !l.starts_with("REVIEW--")) {
+        while let Some(i) = lines.next_if(|l| {
+            !l.starts_with("REVIEW--") && !l.starts_with("---") && !l.starts_with("<<<")
+        }) {
             back.push_str(i);
             back.push('\n');
         }
 
+        if let Some(actual_front) = front.strip_prefix(':') {
+            front = actual_front;
+            let mut back_id: [u8; 6] = id;
+
+            back_id[0] = back_id[0] ^ 0x80;
+            res.push(CardBody {
+                id: CardId(back_id),
+                front: back.clone(),
+                back: front.to_string(),
+            });
+        };
         res.push(CardBody {
             id: CardId(id),
-            front,
+            front: front.to_string(),
             back,
         });
     }
@@ -93,24 +108,6 @@ enum Commands {
 
     /// Lists all the cards in the given file
     Cards { files: Vec<PathBuf> },
-}
-
-fn update_review_data(
-    sqlite: &mut rusqlite::Connection,
-    id: CardId,
-    fsrs: FSRSParams,
-) -> anyhow::Result<()> {
-    sqlite.execute(
-        "insert into review(card, last_reviewed, stability, difficulty)
-                                     values (?1, ?2, ?3, ?4)",
-        (
-            id.as_int(),
-            SystemTime::UNIX_EPOCH.elapsed()?.as_secs(),
-            fsrs.stability,
-            fsrs.difficulty,
-        ),
-    )?;
-    Ok(())
 }
 
 fn load_file(file: &Path) -> anyhow::Result<String> {
@@ -232,7 +229,16 @@ fn main() -> anyhow::Result<()> {
                         FSRSParams::from_initial_grade(grade)
                     };
                     iters += 1;
-                    update_review_data(&mut sqlite, card.id, fsrs)?;
+                    sqlite.execute(
+                        "insert into review(card, last_reviewed, stability, difficulty)
+                                     values (?1, ?2, ?3, ?4)",
+                        (
+                            card.id.as_int(),
+                            SystemTime::UNIX_EPOCH.elapsed()?.as_secs(),
+                            fsrs.stability,
+                            fsrs.difficulty,
+                        ),
+                    )?;
                 }
                 if iters == 0 {
                     break;
